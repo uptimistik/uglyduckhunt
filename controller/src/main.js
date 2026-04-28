@@ -177,6 +177,24 @@ function attachSensorListeners() {
   window.addEventListener('deviceorientationabsolute', onOrientation, true);
   // We don't need devicemotion for tracking, but we count it to confirm sensors work at all.
   window.addEventListener('devicemotion', () => { state.motionCount++; }, true);
+
+  // Debug: log sensor listener attachment
+  console.log('[Sensors] Attached listeners for deviceorientation, deviceorientationabsolute, devicemotion');
+
+  // Test if sensors are firing by logging the first few events
+  let orientationTestCount = 0;
+  const orientationTestHandler = (e) => {
+    if (orientationTestCount < 5) {
+      console.log('[Sensors] deviceorientation event:', { alpha: e.alpha, beta: e.beta, gamma: e.gamma, absolute: e.absolute });
+      orientationTestCount++;
+    }
+  };
+  window.addEventListener('deviceorientation', orientationTestHandler, true);
+
+  setTimeout(() => {
+    console.log('[Sensors] Orientation count after 2s:', state.orientationCount, 'Motion count:', state.motionCount);
+    window.removeEventListener('deviceorientation', orientationTestHandler, true);
+  }, 2000);
 }
 
 // ---------------- Sensor handling ----------------

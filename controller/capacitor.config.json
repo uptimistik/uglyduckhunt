@@ -1,5 +1,8 @@
 {
   "appId": "com.duckhunt.controller",
   "appName": "Controller",
-  "webDir": "dist"
+  "webDir": "dist",
+  "android": {
+    "webContentsDebuggingEnabled": true
+  }
 }
