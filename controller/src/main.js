@@ -337,6 +337,10 @@ function emit() {
     return;
   }
 
+  // Rolling 16-bit sequence so the screen can drop stale packets that
+  // arrive out of order on the unreliable/unordered gyro channel.
+  state.gyroSeq = ((state.gyroSeq | 0) + 1) & 0xffff;
+
   // Hot path. Prefer the direct WebRTC data channel (≈LAN latency).
   // Fall back to the relay socket if the channel isn't open yet or has
   // dropped — gameplay never stops because of that.
@@ -344,12 +348,12 @@ function emit() {
     // bufferedAmount guard: if the channel is backed up we'd rather drop
     // this packet than make it worse.
     if (state.gyroDC.bufferedAmount < 64 * 1024) {
-      try { state.gyroDC.send(JSON.stringify({ nx: fx, ny: fy })); } catch(e) {}
+      try { state.gyroDC.send(JSON.stringify({ nx: fx, ny: fy, seq: state.gyroSeq })); } catch(e) {}
     }
   } else if (state.socket?.connected) {
     // volatile: if the socket is busy/buffering, drop this packet instead
     // of queueing it. Queuing on a slow WAN link is what creates rubber-band lag.
-    state.socket.volatile.emit('gyro_data', { roomCode: state.roomCode, nx: fx, ny: fy });
+    state.socket.volatile.emit('gyro_data', { roomCode: state.roomCode, nx: fx, ny: fy, seq: state.gyroSeq });
   }
   updateDiag();
 }

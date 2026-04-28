@@ -192,11 +192,10 @@ function setupRTC() {
   gyroDC.onopen = () => setRtcStatus(true);
   gyroDC.onclose = () => setRtcStatus(false);
   gyroDC.onmessage = (e) => {
-    // Hot path. Avoid try/catch overhead on the happy path.
-    const d = JSON.parse(e.data);
-    if (!Number.isFinite(d?.nx) || !Number.isFinite(d?.ny)) return;
-    aim.nx = d.nx; aim.ny = d.ny;
-    pktCount++;
+    // Hot path — forward to shared apply fn so stale-packet rejection
+    // also covers WebRTC (unreliable, unordered) traffic.
+    const fn = window.__applyGyro;
+    if (fn) fn(JSON.parse(e.data));
   };
 
   eventDC.onmessage = (e) => {
@@ -1581,11 +1580,33 @@ const aim = { nx: 0, ny: 0, sx: 0, sy: 0 };
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
 
-socket.on('gyro_data', (data) => {
+// Sequence tracking. The gyro data channel is unreliable + unordered
+// (UDP-like) so out-of-order packets are normal. We accept a packet only
+// if its seq is newer than the last one we applied — this prevents the
+// crosshair from "jumping back" to a stale position.
+let lastGyroSeq = -1;
+const SEQ_MOD = 1 << 16; // seq is a 16-bit rolling counter from the phone
+function isNewerSeq(incoming, previous) {
+  // Circular comparison: treat half the range as "newer".
+  const diff = ((incoming - previous) + SEQ_MOD) % SEQ_MOD;
+  return diff !== 0 && diff < SEQ_MOD / 2;
+}
+
+function applyGyro(data) {
   if (!Number.isFinite(data?.nx) || !Number.isFinite(data?.ny)) return;
+  if (Number.isFinite(data.seq)) {
+    if (lastGyroSeq >= 0 && !isNewerSeq(data.seq, lastGyroSeq)) return; // stale, drop
+    lastGyroSeq = data.seq;
+  }
   aim.nx = data.nx; aim.ny = data.ny;
   pktCount++;
-});
+}
+
+// Hook both transports into the same apply function. WebRTC gyro channel
+// (in setupRTC above) also calls applyGyro now.
+socket.on('gyro_data', applyGyro);
+// Expose for the WebRTC data-channel handler to use:
+window.__applyGyro = applyGyro;
 
 socket.on('trigger', () => fireShot());
 

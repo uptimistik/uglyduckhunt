@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "npm run patch-plugins && vite build",
+    "preview": "vite preview",
+    "patch-plugins": "node scripts/patch-plugins.js",
+    "postinstall": "node scripts/patch-plugins.js"
   },
   "devDependencies": {
     "@capacitor/cli": "^7.6.2",
