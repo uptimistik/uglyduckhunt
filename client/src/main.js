@@ -5,7 +5,10 @@ import './style.css';
 import * as THREE from 'three';
 import { io } from 'socket.io-client';
 
-const socket = io('https://cryptoduckhunt.replit.app');
+const socket = io('https://cryptoduckhunt.replit.app', {
+  transports: ['polling', 'websocket'],
+  timeout: 5000,
+});
 
 // --------------------------- HUD -------------------------------------
 document.querySelector('#app').innerHTML = `

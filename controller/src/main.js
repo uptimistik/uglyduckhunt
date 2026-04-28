@@ -539,7 +539,7 @@ async function onConnect() {
   const finalUrl = `${protocol}://${state.serverIP}${port}`;
 
   state.socket = io(finalUrl, {
-    transports: ['websocket'],
+    transports: ['polling', 'websocket'],
     timeout: 5000,
   });
 
