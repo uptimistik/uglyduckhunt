@@ -446,11 +446,18 @@ if (SpeechRecognition) {
   const recognition = new SpeechRecognition();
   recognition.continuous = true;
   recognition.lang = 'en-US';
-  recognition.interimResults = false;
+  recognition.interimResults = true; // FASTER: React before user stops talking
 
   recognition.onresult = (event) => {
-    const last = event.results.length - 1;
-    const transcript = event.results[last][0].transcript.toLowerCase();
+    let interimTranscript = '';
+    let finalTranscript = '';
+
+    for (let i = event.resultIndex; i < event.results.length; ++i) {
+      if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
+      else interimTranscript += event.results[i][0].transcript;
+    }
+
+    const transcript = (finalTranscript || interimTranscript).toLowerCase();
     $('voice-status').textContent = `Heard: "${transcript}"`;
     
     const dogNames = ['goldie', 'rusty', 'snowy'];
@@ -459,9 +466,16 @@ if (SpeechRecognition) {
       if (transcript.includes(name)) targetDog = name;
     });
 
-    if (transcript.includes('sit')) handleDogCommand('sit', targetDog);
-    else if (transcript.includes('fetch')) handleDogCommand('fetch', targetDog);
-    else if (transcript.includes('good boy') || transcript.includes('goodboy')) handleDogCommand('good boy', targetDog);
+    // Fuzzy matching for better accuracy
+    if (transcript.includes('sit') || transcript.includes('set') || transcript.includes('stay')) {
+      handleDogCommand('sit', targetDog);
+    } else if (transcript.includes('fetch') || transcript.includes('search') || transcript.includes('go')) {
+      handleDogCommand('fetch', targetDog);
+    } else if (transcript.includes('relax') || transcript.includes('rest') || transcript.includes('ok')) {
+      handleDogCommand('relax', targetDog);
+    } else if (transcript.includes('good') || transcript.includes('boy') || transcript.includes('treat')) {
+      handleDogCommand('good boy', targetDog);
+    }
   };
 
   recognition.onerror = (e) => {
@@ -513,6 +527,9 @@ function handleDogCommand(cmd, targetName) {
   } else if (cmd === 'fetch') {
     targetDogs.forEach(dog => { if (dog.state === 4) dog.state = 0; });
     status.textContent = `Acknowledged: ${nameLabel} FETCH!`;
+  } else if (cmd === 'relax') {
+    targetDogs.forEach(dog => { if (dog.state === 4) dog.state = 0; });
+    status.textContent = `Acknowledged: ${nameLabel} RELAX!`;
   } else if (cmd === 'good boy') {
     if (treatsInPouch <= 0) {
       status.textContent = 'Pouch empty! Wait for more treats...';
@@ -525,6 +542,7 @@ function handleDogCommand(cmd, targetName) {
     
     targetDogs.forEach(dog => {
       dog.happiness = Math.min(100, dog.happiness + 15);
+      dog.stamina = Math.min(1.0, dog.stamina + 0.4); // Treat restores stamina
       dog.baseSpeed += 1.2;
     });
     
@@ -1399,9 +1417,10 @@ class Dog {
     this.timer = 0;
     this.sprintBurst = 0;
     this.sprintTimer = Math.random() * 5;
-    this.walkDir = Math.random() > 0.5 ? 1 : -1;
     this.walkPhase = Math.random() * Math.PI * 2;
-
+    this.walkDir = Math.random() > 0.5 ? 1 : -1;
+    this.stamina = 1.0; // 0..1 fatigue factor
+    
     this.group = new THREE.Group();
     this.inner = new THREE.Group();
     this.inner.rotation.y = Math.PI; 
@@ -1498,14 +1517,21 @@ class Dog {
         this.legs[1].rotation.x = -Math.sin(trot) * 0.3;
         this.legs[2].rotation.x = -Math.sin(trot) * 0.3;
       } else {
-        // SIT
-        this.group.rotation.x = THREE.MathUtils.lerp(this.group.rotation.x, -Math.PI / 6, dt * 5);
-        this.headGroup.rotation.x = THREE.MathUtils.lerp(this.headGroup.rotation.x, Math.PI / 6, dt * 5);
-        this.legs[0].rotation.x = -Math.PI / 3; this.legs[1].rotation.x = -Math.PI / 3;
-        this.legs[2].rotation.x = Math.PI / 4; this.legs[3].rotation.x = Math.PI / 4;
+        // SIT - Fix upside down issue by rotating POSITIVELY (tilting back)
+        this.group.rotation.x = THREE.MathUtils.lerp(this.group.rotation.x, Math.PI / 10, dt * 5);
+        this.headGroup.rotation.x = THREE.MathUtils.lerp(this.headGroup.rotation.x, -Math.PI / 8, dt * 5);
+        this.legs[0].rotation.x = -Math.PI / 4; this.legs[1].rotation.x = -Math.PI / 4;
+        this.legs[2].rotation.x = Math.PI / 3; this.legs[3].rotation.x = Math.PI / 3;
       }
 
-      this.group.position.lerp(target, dt * 2.5);
+      // Stamina decay while active
+      if (this.state === 0) {
+        this.stamina = Math.max(0.1, this.stamina - dt * 0.005); // Takes ~3 mins to get tired
+      }
+      
+      const currentSpeed = this.baseSpeed * this.stamina;
+
+      this.group.position.lerp(target, dt * (currentSpeed / 8));
       
       this.happiness = Math.max(0, this.happiness - dt * 0.08);
       const wagSpeed = 4 + (this.happiness / 100) * 8;
