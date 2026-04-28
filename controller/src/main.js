@@ -514,14 +514,18 @@ function fire() {
   if (now - lastFireTime < cooldown) return; 
   lastFireTime = now;
 
-  if (state.socket?.connected) {
+  // Don't gate on socket.connected — if the WebRTC event channel is open
+  // we still want to fire even if the relay socket momentarily blipped.
+  const canSend = (state.eventDC && state.eventDC.readyState === 'open') || state.socket?.connected;
+  if (canSend) {
     if (!state.calib.done) {
       // In calibration mode, firing captures the current step
       captureCalibStep();
       doShotEffects();
       flash();
     } else {
-      // Normal gameplay fire
+      // Normal gameplay fire — send the trigger FIRST so the network
+      // packet goes out before we spend any time on local effects.
       sendEvent('trigger');
       doShotEffects();
       flash();
