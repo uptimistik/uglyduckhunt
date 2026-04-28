@@ -49,20 +49,35 @@ io.on('connection', (socket) => {
     socket.emit('join_ok', roomCode);
   });
 
-  // Relay gyro data (forward everything except the roomCode)
+  // Relay gyro data (forward everything except the roomCode).
+  // Hot path: keep this as small as possible. We deliberately skip the
+  // per-packet ack — over WAN it doubles round-trips and creates lag.
+  // Use `volatile` so if the screen is overloaded, packets are dropped
+  // instead of queued (queuing causes rubber-banding).
   socket.on('gyro_data', (data) => {
     if (!data || !data.roomCode) return;
     const { roomCode, ...payload } = data;
+    socket.volatile.to(roomCode).emit('gyro_data', payload);
+  });
 
+  // ---------------- WebRTC signaling relay ----------------
+  // Once a controller and a screen are in the same room, they negotiate a
+  // direct peer-to-peer connection (RTCDataChannel). After that, gyro_data
+  // and trigger events flow phone <-> PC directly, skipping this server
+  // entirely. We just shuttle SDP and ICE candidates here.
+  socket.on('rtc_signal', (data) => {
+    if (!data || !data.roomCode) return;
+    const { roomCode, ...payload } = data;
+    socket.to(roomCode).emit('rtc_signal', payload);
+  });
+
+  // Lightweight liveness probe (optional). Controller can call this
+  // periodically (e.g. once per second) to update its "relay ok/miss"
+  // diagnostic without paying ack cost on every gyro packet.
+  socket.on('relay_ping', (roomCode, cb) => {
     const roomSize = io.sockets.adapter.rooms.get(roomCode)?.size || 0;
-    const recipients = Math.max(0, roomSize - 1); // minus sender
-    if (recipients === 0) {
-      socket.emit('gyro_server_ack', { roomCode, relayed: false, recipients: 0 });
-      return;
-    }
-
-    socket.to(roomCode).emit('gyro_data', payload);
-    socket.emit('gyro_server_ack', { roomCode, relayed: true, recipients });
+    const recipients = Math.max(0, roomSize - 1);
+    if (typeof cb === 'function') cb({ recipients });
   });
 
   // Relay trigger event (Volume Down pressed) — browser decides if it's calibration or shoot

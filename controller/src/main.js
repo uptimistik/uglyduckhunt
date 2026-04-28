@@ -22,7 +22,7 @@ import { CapacitorFlash } from '@capgo/capacitor-flash';
 //  - Touch the aim pad to aim manually if sensors aren't available.
 // ============================================================
 
-const EMIT_HZ = 90;
+const EMIT_HZ = 60;
 const DEFAULT_HALF = 25 * Math.PI / 180; // fallback half-FOV until user calibrates
 const MIN_HALF = 3 * Math.PI / 180;      // safety floor so divisions never blow up
 
@@ -140,6 +140,7 @@ const calibCard = $('calibCard');
 const playCard = $('playCard');
 const blankCard = $('blankCard');
 const playStatus = $('playStatus');
+const setupStatus = $('setupStatus');
 const connBadge = $('connBadge');
 
 $('connectBtn').addEventListener('click', onConnect);
@@ -336,8 +337,19 @@ function emit() {
     return;
   }
 
-  if (state.socket?.connected) {
-    state.socket.emit('gyro_data', { roomCode: state.roomCode, nx: fx, ny: fy });
+  // Hot path. Prefer the direct WebRTC data channel (≈LAN latency).
+  // Fall back to the relay socket if the channel isn't open yet or has
+  // dropped — gameplay never stops because of that.
+  if (state.gyroDC && state.gyroDC.readyState === 'open') {
+    // bufferedAmount guard: if the channel is backed up we'd rather drop
+    // this packet than make it worse.
+    if (state.gyroDC.bufferedAmount < 64 * 1024) {
+      try { state.gyroDC.send(JSON.stringify({ nx: fx, ny: fy })); } catch(e) {}
+    }
+  } else if (state.socket?.connected) {
+    // volatile: if the socket is busy/buffering, drop this packet instead
+    // of queueing it. Queuing on a slow WAN link is what creates rubber-band lag.
+    state.socket.volatile.emit('gyro_data', { roomCode: state.roomCode, nx: fx, ny: fy });
   }
   updateDiag();
 }
@@ -375,6 +387,28 @@ function updateDiag() {
   }
 }
 
+// ---------------- Event channel helper ----------------
+// Send a discrete event (trigger / calib_*) over the reliable WebRTC data
+// channel when available; fall back to the socket relay otherwise.
+function sendEvent(type, payload) {
+  if (state.eventDC && state.eventDC.readyState === 'open') {
+    try {
+      state.eventDC.send(JSON.stringify({ type, ...(payload || {}) }));
+      return;
+    } catch (e) { /* fall through to socket */ }
+  }
+  if (!state.socket?.connected) return;
+  if (type === 'trigger') {
+    state.socket.emit('trigger', state.roomCode);
+  } else if (type === 'calib_start') {
+    state.socket.emit('calib_start', state.roomCode);
+  } else if (type === 'calib_done') {
+    state.socket.emit('calib_done', state.roomCode);
+  } else if (type === 'calib_state') {
+    state.socket.emit('calib_state', { roomCode: state.roomCode, ...(payload || {}) });
+  }
+}
+
 // ---------------- Calibration wizard ----------------
 const CALIB_STEPS = [
   { key: 'center', title: 'Aim at CENTER of TV',
@@ -403,9 +437,7 @@ function startCalibrationWizard() {
   setupCard.classList.add('hidden');
   blankCard.classList.remove('hidden'); // Show blank screen to prevent touches
   
-  if (state.socket?.connected) {
-    state.socket.emit('calib_start', state.roomCode);
-  }
+  sendEvent('calib_start');
   renderCalibStep();
 }
 
@@ -413,13 +445,10 @@ function renderCalibStep() {
   const idx = state.calib.step - 1;
   const step = CALIB_STEPS[idx];
   if (!step) return;
-  if (state.socket?.connected) {
-    state.socket.emit('calib_state', {
-      roomCode: state.roomCode,
-      title: `Step ${state.calib.step} of 5: ${step.title}`,
-      sub: step.sub
-    });
-  }
+  sendEvent('calib_state', {
+    title: `Step ${state.calib.step} of 5: ${step.title}`,
+    sub: step.sub,
+  });
 }
 
 function captureCalibStep() {
@@ -450,9 +479,7 @@ function captureCalibStep() {
 
 function finishCalibration() {
   state.calib.done = true;
-  if (state.socket?.connected) {
-    state.socket.emit('calib_done', state.roomCode);
-  }
+  sendEvent('calib_done');
 }
 
 // Server-driven "recalibrate" event from the PC restarts the wizard.
@@ -495,7 +522,7 @@ function fire() {
       flash();
     } else {
       // Normal gameplay fire
-      state.socket.emit('trigger', state.roomCode);
+      sendEvent('trigger');
       doShotEffects();
       flash();
 
@@ -539,13 +566,27 @@ async function onConnect() {
   const finalUrl = `${protocol}://${state.serverIP}${port}`;
 
   state.socket = io(finalUrl, {
-    transports: ['polling', 'websocket'],
+    transports: ['websocket'],
+    upgrade: false,
     timeout: 5000,
+    // Auto-reconnect settings tuned for mobile: iOS suspends the socket when
+    // the user pulls down a notification or backgrounds the app. We want to
+    // recover fast and keep trying forever.
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 500,      // start retrying quickly
+    reconnectionDelayMax: 3000,  // cap backoff at 3s so we never sit dead for long
+    randomizationFactor: 0.3,
   });
 
   state.socket.on('connect_error', (err) => {
-    setupStatus.textContent = `Connect error: ${err.message}. Check server IP, same Wi-Fi, and that server is running.`;
-    connBadge.textContent = 'Error'; connBadge.className = 'badge bad';
+    // Don't overwrite the "reconnecting" UI once we've been connected at least once.
+    if (!state.hasEverConnected) {
+      setupStatus.textContent = `Connect error: ${err.message}. Check server IP, same Wi-Fi, and that server is running.`;
+      connBadge.textContent = 'Error'; connBadge.className = 'badge bad';
+    } else {
+      connBadge.textContent = 'Reconnecting…'; connBadge.className = 'badge bad';
+    }
   });
   state.socket.on('join_error', (msg) => {
     playStatus.textContent = msg;
@@ -553,38 +594,151 @@ async function onConnect() {
     connBadge.className = 'badge bad';
   });
   state.socket.on('join_ok', () => {
-    playStatus.textContent = 'Connected. Aim where you want the center to be, then tap Calibrate.';
+    playStatus.textContent = state.hasEverConnected
+      ? 'Reconnected. Ready to shoot.'
+      : 'Connected. Aim where you want the center to be, then tap Calibrate.';
   });
-  state.socket.on('gyro_server_ack', (ack) => {
-    if (ack?.relayed) {
-      state.relayOkCount++;
-    } else {
-      state.relayMissCount++;
-      playStatus.textContent = `No PC screen in room ${state.roomCode}. Open the game page first.`;
+  // Low-rate relay liveness check — replaces the per-packet ack to cut WAN traffic.
+  if (state.relayPingTimer) clearInterval(state.relayPingTimer);
+  state.relayPingTimer = setInterval(() => {
+    if (!state.socket?.connected) return;
+    state.socket.timeout(2000).emit('relay_ping', state.roomCode, (err, res) => {
+      if (err || !res) { state.relayMissCount++; return; }
+      if (res.recipients > 0) {
+        state.relayOkCount++;
+      } else {
+        state.relayMissCount++;
+        playStatus.textContent = `No PC screen in room ${state.roomCode}. Open the game page first.`;
+      }
+    });
+  }, 1000);
+  state.socket.on('disconnect', (reason) => {
+    state.connected = false;
+    connBadge.textContent = 'Reconnecting…'; connBadge.className = 'badge bad';
+    playStatus.textContent = `Lost connection (${reason}). Reconnecting…`;
+    // If the server closed us deliberately (e.g. `io.disconnect()`), Socket.IO
+    // won't auto-reconnect. Force it.
+    if (reason === 'io server disconnect') {
+      try { state.socket.connect(); } catch(e) {}
     }
   });
-  state.socket.on('disconnect', () => {
-    state.connected = false;
-    connBadge.textContent = 'Disconnected'; connBadge.className = 'badge bad';
-    playStatus.textContent = 'Disconnected.';
-  });
   state.socket.on('connect', () => {
+    // Always (re)join the room — both on first connect AND on every reconnect.
     state.socket.emit('join_room', state.roomCode);
     state.connected = true;
     connBadge.textContent = `Room ${state.roomCode}`; connBadge.className = 'badge ok';
     setupCard.classList.add('hidden');
-    
+
     if (!state.volumeTriggersSetup) {
       setupVolumeTriggers();
       state.volumeTriggersSetup = true;
     }
 
-    // Drop straight into calibration wizard once connected.
-    setTimeout(startCalibrationWizard, 250);
+    if (!state.hasEverConnected) {
+      state.hasEverConnected = true;
+      // First connect only — drop into calibration wizard.
+      setTimeout(startCalibrationWizard, 250);
+    } else {
+      // Reconnect: DO NOT wipe calibration. Just re-arm sensors in case
+      // iOS paused them while the app was backgrounded, and restore the
+      // play/calib card that was visible before the drop.
+      attachSensorListeners();
+      playStatus.textContent = 'Reconnected. Keep shooting.';
+    }
   });
 
   state.socket.on('recalibrate', calibrateFromRemote);
+
+  // ---------------- WebRTC peer connection (controller = answerer) ----------------
+  // The screen creates the data channels and sends the offer once it sees
+  // our 'join_room'. We just answer and wire up the channels.
+  state.socket.on('rtc_signal', async (msg) => {
+    try {
+      if (msg.sdp && msg.sdp.type === 'offer') {
+        ensureRTC();
+        await state.pc.setRemoteDescription(msg.sdp);
+        const answer = await state.pc.createAnswer();
+        await state.pc.setLocalDescription(answer);
+        state.socket.emit('rtc_signal', { roomCode: state.roomCode, sdp: state.pc.localDescription });
+      } else if (msg.ice && state.pc) {
+        try { await state.pc.addIceCandidate(msg.ice); } catch(e) {}
+      }
+    } catch (err) {
+      console.warn('RTC signal handle failed:', err);
+    }
+  });
 }
+
+function ensureRTC() {
+  if (state.pc) {
+    try { state.pc.close(); } catch(e) {}
+  }
+  state.pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ],
+  });
+  state.gyroDC = null;
+  state.eventDC = null;
+
+  state.pc.onicecandidate = (e) => {
+    if (e.candidate && state.socket?.connected) {
+      state.socket.emit('rtc_signal', { roomCode: state.roomCode, ice: e.candidate });
+    }
+  };
+
+  state.pc.ondatachannel = (e) => {
+    const dc = e.channel;
+    if (dc.label === 'gyro') {
+      state.gyroDC = dc;
+      dc.onopen = () => {
+        playStatus.textContent = 'P2P direct link active — minimal lag.';
+        connBadge.textContent = `P2P · ${state.roomCode}`;
+      };
+      dc.onclose = () => {
+        if (connBadge.textContent.startsWith('P2P')) {
+          connBadge.textContent = `Room ${state.roomCode}`;
+        }
+      };
+    } else if (dc.label === 'events') {
+      state.eventDC = dc;
+      // Screen never sends us anything on this channel today, but wire it
+      // up so we can add server->controller events later if needed.
+      dc.onmessage = () => {};
+    }
+  };
+
+  state.pc.onconnectionstatechange = () => {
+    if (!state.pc) return;
+    if (state.pc.connectionState === 'failed' || state.pc.connectionState === 'disconnected') {
+      // Don't kill it — gameplay falls back to socket relay automatically.
+      // Next reconnect/re-offer will set up a fresh peer connection.
+    }
+  };
+}
+
+// ---------------- Lifecycle: recover from backgrounding / notifications ----------------
+// When the user pulls down a notification, locks the phone, or switches apps,
+// iOS freezes the webview. Sensor streams stop and Socket.IO may silently
+// disconnect. When we come back, kick the socket so it reconnects immediately
+// instead of waiting for the next backoff tick.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  // Re-arm sensors (safe to call repeatedly — same listeners are deduped by the browser).
+  attachSensorListeners();
+  const s = state.socket;
+  if (!s) return;
+  if (!s.connected) {
+    try { s.connect(); } catch(e) {}
+  }
+});
+window.addEventListener('pageshow', () => {
+  const s = state.socket;
+  if (s && !s.connected) {
+    try { s.connect(); } catch(e) {}
+  }
+});
 
 function setupVolumeTriggers() {
   try {

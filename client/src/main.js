@@ -6,7 +6,8 @@ import * as THREE from 'three';
 import { io } from 'socket.io-client';
 
 const socket = io('https://cryptoduckhunt.replit.app', {
-  transports: ['polling', 'websocket'],
+  transports: ['websocket'],
+  upgrade: false,
   timeout: 5000,
 });
 
@@ -126,12 +127,128 @@ let dogs = [];
 const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
 $('room-code').textContent = roomCode;
 
+// Always (re-)create the room on every connect AND reconnect — otherwise
+// when the screen briefly drops, the server forgets this roomCode has a
+// screen and new controllers get "Room has no active screen".
 socket.on('connect', () => socket.emit('create_room', roomCode));
+socket.on('disconnect', () => {
+  statusEl.textContent = 'Screen disconnected. Reconnecting…';
+  statusEl.style.color = '#ff9d00';
+});
+// Kick reconnect fast when the tab becomes visible again.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && !socket.connected) {
+    try { socket.connect(); } catch(e) {}
+  }
+});
 socket.on('controller_connected', () => {
   statusEl.textContent = 'Controller Connected - Point & Shoot';
   statusEl.style.color = '#4caf50';
+  // The controller just joined our room. Kick off WebRTC negotiation so
+  // the rest of the game flows phone <-> PC directly with ~LAN latency.
+  setupRTC();
 });
 
+// ---------------- WebRTC peer connection (screen = offerer) ----------------
+// We open two channels:
+//  - "gyro"   : unreliable + unordered (UDP-like) for 60Hz aim packets.
+//               If a packet is late, we'd rather drop it than queue it.
+//  - "events" : reliable + ordered for trigger / calib state. Losing a
+//               shot trigger feels terrible, so this one we make sure of.
+let pc = null;
+let gyroDC = null;
+let eventDC = null;
+let rtcReady = false;
+
+function setRtcStatus(active) {
+  rtcReady = !!active;
+  if (active) {
+    statusEl.textContent = 'P2P Connected — Point & Shoot';
+    statusEl.style.color = '#4caf50';
+  }
+}
+
+function teardownRTC() {
+  rtcReady = false;
+  try { gyroDC?.close(); } catch(e) {}
+  try { eventDC?.close(); } catch(e) {}
+  try { pc?.close(); } catch(e) {}
+  gyroDC = null; eventDC = null; pc = null;
+}
+
+function setupRTC() {
+  teardownRTC();
+  pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ],
+  });
+
+  // Create channels BEFORE the offer so they end up in the SDP.
+  gyroDC = pc.createDataChannel('gyro', { ordered: false, maxRetransmits: 0 });
+  eventDC = pc.createDataChannel('events', { ordered: true });
+
+  gyroDC.onopen = () => setRtcStatus(true);
+  gyroDC.onclose = () => setRtcStatus(false);
+  gyroDC.onmessage = (e) => {
+    // Hot path. Avoid try/catch overhead on the happy path.
+    const d = JSON.parse(e.data);
+    if (!Number.isFinite(d?.nx) || !Number.isFinite(d?.ny)) return;
+    aim.nx = d.nx; aim.ny = d.ny;
+    pktCount++;
+  };
+
+  eventDC.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    switch (d.type) {
+      case 'trigger': fireShot(); break;
+      case 'calib_start':
+        $('calib-overlay').style.display = 'flex';
+        break;
+      case 'calib_state':
+        $('calib-overlay').style.display = 'flex';
+        $('calib-overlay-title').textContent = d.title;
+        $('calib-overlay-sub').textContent = d.sub;
+        break;
+      case 'calib_done':
+        $('calib-overlay').style.display = 'none';
+        break;
+    }
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) socket.emit('rtc_signal', { roomCode, ice: e.candidate });
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (!pc) return;
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      setRtcStatus(false);
+    }
+  };
+
+  pc.createOffer()
+    .then(offer => pc.setLocalDescription(offer))
+    .then(() => socket.emit('rtc_signal', { roomCode, sdp: pc.localDescription }))
+    .catch(err => console.warn('RTC offer failed:', err));
+}
+
+socket.on('rtc_signal', async (msg) => {
+  if (!pc) return;
+  try {
+    if (msg.sdp && msg.sdp.type === 'answer') {
+      await pc.setRemoteDescription(msg.sdp);
+    } else if (msg.ice) {
+      await pc.addIceCandidate(msg.ice);
+    }
+  } catch (err) {
+    console.warn('RTC signal handle failed:', err);
+  }
+});
+
+// Server-relayed fallbacks. These still work if WebRTC negotiation fails
+// (e.g. symmetric NAT with no reachable STUN), so the game never breaks.
 socket.on('calib_start', () => {
   $('calib-overlay').style.display = 'flex';
 });
