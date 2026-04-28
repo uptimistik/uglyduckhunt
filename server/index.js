@@ -22,7 +22,14 @@ const io = new Server(server, {
 });
 
 const PORT = process.env.PORT || 3000;
+const MAX_PLAYERS_PER_ROOM = 2;
 const roomScreens = new Map(); // roomCode -> screen socket id
+const roomPlayers = new Map(); // roomCode -> [{ id, slot }] (controllers only)
+
+function getOrCreatePlayers(roomCode) {
+  if (!roomPlayers.has(roomCode)) roomPlayers.set(roomCode, []);
+  return roomPlayers.get(roomCode);
+}
 
 io.on('connection', (socket) => {
   console.log('A user connected:', socket.id);
@@ -42,11 +49,30 @@ io.on('connection', (socket) => {
       return;
     }
 
+    const players = getOrCreatePlayers(roomCode);
+    // Reconnect path: if this socket id is already in the list, just
+    // re-announce. Otherwise, allocate a new slot.
+    let player = players.find(p => p.id === socket.id);
+    if (!player) {
+      if (players.length >= MAX_PLAYERS_PER_ROOM) {
+        socket.emit('join_error', `Room ${roomCode} is full (${MAX_PLAYERS_PER_ROOM} players max).`);
+        return;
+      }
+      // Pick the lowest available slot (1 or 2) so reconnects keep colours.
+      const usedSlots = new Set(players.map(p => p.slot));
+      let slot = 1;
+      while (usedSlots.has(slot)) slot++;
+      player = { id: socket.id, slot };
+      players.push(player);
+    }
+
     socket.join(roomCode);
-    console.log(`Controller ${socket.id} joined room ${roomCode}`);
-    // Notify the screen that a controller connected
-    socket.to(roomCode).emit('controller_connected');
-    socket.emit('join_ok', roomCode);
+    socket.data.roomCode = roomCode;
+    socket.data.slot = player.slot;
+    console.log(`Controller ${socket.id} joined room ${roomCode} as P${player.slot}`);
+    // Notify the screen that a controller connected (with player identity).
+    io.to(screenSocketId).emit('controller_connected', { playerId: socket.id, slot: player.slot });
+    socket.emit('join_ok', { roomCode, playerId: socket.id, slot: player.slot, screenId: screenSocketId });
   });
 
   // Relay gyro data (forward everything except the roomCode).
@@ -57,7 +83,11 @@ io.on('connection', (socket) => {
   socket.on('gyro_data', (data) => {
     if (!data || !data.roomCode) return;
     const { roomCode, ...payload } = data;
-    socket.volatile.to(roomCode).emit('gyro_data', payload);
+    // Stamp the playerId so the screen knows which player this aim belongs to.
+    payload.playerId = socket.id;
+    const screenSocketId = roomScreens.get(roomCode);
+    if (!screenSocketId) return;
+    io.to(screenSocketId).volatile.emit('gyro_data', payload);
   });
 
   // ---------------- WebRTC signaling relay ----------------
@@ -67,8 +97,17 @@ io.on('connection', (socket) => {
   // entirely. We just shuttle SDP and ICE candidates here.
   socket.on('rtc_signal', (data) => {
     if (!data || !data.roomCode) return;
-    const { roomCode, ...payload } = data;
-    socket.to(roomCode).emit('rtc_signal', payload);
+    const { roomCode, to, ...payload } = data;
+    // Stamp sender so the receiver can address replies back. With 2 players
+    // in a room (3 sockets total: 1 screen + 2 controllers), broadcasting
+    // signaling would cross-talk between players, so we route by `to`.
+    payload.from = socket.id;
+    if (to) {
+      io.to(to).emit('rtc_signal', payload);
+    } else {
+      // Back-compat fallback — used to be the only path.
+      socket.to(roomCode).emit('rtc_signal', payload);
+    }
   });
 
   // Lightweight liveness probe (optional). Controller can call this
@@ -82,8 +121,10 @@ io.on('connection', (socket) => {
 
   // Relay trigger event (Volume Down pressed) — browser decides if it's calibration or shoot
   socket.on('trigger', (roomCode) => {
-    socket.to(roomCode).emit('trigger');
-    console.log(`Trigger from ${socket.id} in room ${roomCode}`);
+    const screenSocketId = roomScreens.get(roomCode);
+    if (!screenSocketId) return;
+    io.to(screenSocketId).emit('trigger', { playerId: socket.id });
+    console.log(`Trigger from ${socket.id} (P${socket.data?.slot}) in room ${roomCode}`);
   });
 
   socket.on('recalibrate', (roomCode) => {
@@ -110,8 +151,26 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    // If this was a screen, clear its room.
     for (const [roomCode, screenSocketId] of roomScreens.entries()) {
-      if (screenSocketId === socket.id) roomScreens.delete(roomCode);
+      if (screenSocketId === socket.id) {
+        roomScreens.delete(roomCode);
+        roomPlayers.delete(roomCode);
+      }
+    }
+    // If this was a controller, drop them from their room's player list and
+    // tell the screen to remove their crosshair.
+    const roomCode = socket.data?.roomCode;
+    if (roomCode) {
+      const players = roomPlayers.get(roomCode);
+      if (players) {
+        const idx = players.findIndex(p => p.id === socket.id);
+        if (idx >= 0) players.splice(idx, 1);
+      }
+      const screenSocketId = roomScreens.get(roomCode);
+      if (screenSocketId) {
+        io.to(screenSocketId).emit('controller_disconnected', { playerId: socket.id });
+      }
     }
     console.log('User disconnected:', socket.id);
   });

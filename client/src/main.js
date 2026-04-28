@@ -62,8 +62,12 @@ document.querySelector('#app').innerHTML = `
         <span>WAVE <b id="wave">1</b></span>
         <span>PKTS <b id="pkts">0</b></span>
       </div>
+      <div id="player-scores" class="panel small">
+        <!-- Per-player scores injected at runtime -->
+      </div>
     </div>
     <div id="crosshair"></div>
+    <div id="kill-banner"></div>
   </div>
   <div id="calib-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.9); z-index:10; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding: 40px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;">
     <h1 id="calib-overlay-title" style="font-size:48px; margin-bottom:30px; color:#ff9d00;">Calibration</h1>
@@ -110,6 +114,20 @@ css.textContent = `
   #voice-btn:hover { background:#ffb74d; transform:scale(1.05); }
   #voice-btn.active { background:#4caf50; color:#fff; }
   #voice-status { font-size:10px; text-align:center; color:#888; font-style:italic; }
+
+  /* Multi-player score panel */
+  #player-scores { display:flex; gap:30px; }
+  .pscore { display:flex; flex-direction:column; align-items:flex-end; }
+  .pscore .label { font-size:10px; letter-spacing:2px; font-weight:700; }
+  .pscore .val { font-size:22px; font-weight:300; color:#fff; line-height:1.1; }
+  .pscore.p1 .label { color:#ff5252; }
+  .pscore.p2 .label { color:#42a5f5; }
+
+  /* Kill banner */
+  #kill-banner { position:fixed; top:90px; left:50%; transform:translateX(-50%) translateY(-40px); padding:10px 24px; border-radius:24px; font-weight:800; font-size:14px; letter-spacing:1px; opacity:0; transition:0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); pointer-events:none; z-index:50; }
+  #kill-banner.show { transform:translateX(-50%) translateY(0); opacity:1; }
+  #kill-banner.p1 { background:rgba(255,82,82,0.95); color:#fff; box-shadow:0 0 24px rgba(255,82,82,0.6); }
+  #kill-banner.p2 { background:rgba(66,165,245,0.95); color:#fff; box-shadow:0 0 24px rgba(66,165,245,0.6); }
 `;
 document.head.appendChild(css);
 
@@ -141,73 +159,169 @@ document.addEventListener('visibilitychange', () => {
     try { socket.connect(); } catch(e) {}
   }
 });
-socket.on('controller_connected', () => {
-  statusEl.textContent = 'Controller Connected - Point & Shoot';
-  statusEl.style.color = '#4caf50';
-  // The controller just joined our room. Kick off WebRTC negotiation so
-  // the rest of the game flows phone <-> PC directly with ~LAN latency.
-  setupRTC();
-});
+// ============================================================================
+// MULTI-PLAYER STATE
+// Each connected controller becomes a Player with its own aim, score, laser,
+// crosshair, and WebRTC peer connection. The screen is the WebRTC offerer
+// for *each* peer (one PC per controller).
+// ============================================================================
+const PLAYER_COLORS = {
+  1: { laser: 0xff3030, halo: 0x330000, beam: 0xff4040, hex: '#ff5252', label: 'P1' },
+  2: { laser: 0x3080ff, halo: 0x000033, beam: 0x40a0ff, hex: '#42a5f5', label: 'P2' },
+};
 
-// ---------------- WebRTC peer connection (screen = offerer) ----------------
-// We open two channels:
-//  - "gyro"   : unreliable + unordered (UDP-like) for 60Hz aim packets.
-//               If a packet is late, we'd rather drop it than queue it.
-//  - "events" : reliable + ordered for trigger / calib state. Losing a
-//               shot trigger feels terrible, so this one we make sure of.
-let pc = null;
-let gyroDC = null;
-let eventDC = null;
-let rtcReady = false;
+const players = new Map(); // playerId -> Player
 
-function setRtcStatus(active) {
-  rtcReady = !!active;
+function buildLaserSet(colors) {
+  const dot = new THREE.Mesh(
+    new THREE.SphereGeometry(0.2, 16, 16),
+    new THREE.MeshBasicMaterial({ color: colors.laser, depthTest: false })
+  );
+  dot.renderOrder = 999; scene.add(dot);
+
+  const halo = new THREE.Mesh(
+    new THREE.SphereGeometry(0.65, 16, 16),
+    new THREE.MeshBasicMaterial({ color: colors.halo, transparent: true, opacity: 0.7, depthWrite: false, depthTest: false })
+  );
+  halo.renderOrder = 998; scene.add(halo);
+
+  const beamGeo = new THREE.CylinderGeometry(0.05, 0.05, 1, 8, 1, true);
+  beamGeo.translate(0, 0.5, 0);
+  const beam = new THREE.Mesh(beamGeo, new THREE.MeshBasicMaterial({ color: colors.beam, transparent: true, opacity: 0.18, depthWrite: false }));
+  beam.renderOrder = 997; scene.add(beam);
+
+  return { dot, halo, beam };
+}
+
+function makePlayer(id, slot) {
+  const colors = PLAYER_COLORS[slot] || PLAYER_COLORS[1];
+  const sights = buildLaserSet(colors);
+  return {
+    id, slot, colors, sights,
+    aim: { nx: 0, ny: 0, sx: 0, sy: 0 },
+    lastSeq: -1,
+    score: 0, shots: 0, hits: 0,
+    pc: null, gyroDC: null, eventDC: null, rtcReady: false,
+  };
+}
+
+function destroyPlayer(p) {
+  scene.remove(p.sights.dot);
+  scene.remove(p.sights.halo);
+  scene.remove(p.sights.beam);
+  try { p.gyroDC?.close(); } catch(e) {}
+  try { p.eventDC?.close(); } catch(e) {}
+  try { p.pc?.close(); } catch(e) {}
+}
+
+function renderPlayerScores() {
+  const host = $('player-scores');
+  if (!host) return;
+  // Sort by slot so P1 is always on the left.
+  const list = Array.from(players.values()).sort((a, b) => a.slot - b.slot);
+  host.innerHTML = list.map(p => `
+    <div class="pscore p${p.slot}">
+      <span class="label">PLAYER ${p.slot}</span>
+      <span class="val" style="color:${p.colors.hex}">${p.score}</span>
+    </div>
+  `).join('');
+}
+
+function showKillBanner(slot) {
+  const el = $('kill-banner');
+  if (!el) return;
+  el.className = `p${slot}`;
+  el.textContent = `PLAYER ${slot} — DUCK DOWN!`;
+  // Restart animation
+  void el.offsetWidth;
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), 1100);
+}
+
+function getOrCreatePlayer(playerId, slot = 1) {
+  let p = players.get(playerId);
+  if (!p) {
+    p = makePlayer(playerId, slot);
+    players.set(playerId, p);
+    renderPlayerScores();
+  }
+  return p;
+}
+
+function setRtcStatusForPlayer(p, active) {
+  p.rtcReady = !!active;
+  // If any player's P2P is up, advertise it in the status bar.
+  const anyP2P = Array.from(players.values()).some(x => x.rtcReady);
   if (active) {
-    statusEl.textContent = 'P2P Connected — Point & Shoot';
+    statusEl.textContent = anyP2P ? 'P2P Connected — Point & Shoot' : 'Controller Connected - Point & Shoot';
     statusEl.style.color = '#4caf50';
   }
 }
 
-function teardownRTC() {
-  rtcReady = false;
-  try { gyroDC?.close(); } catch(e) {}
-  try { eventDC?.close(); } catch(e) {}
-  try { pc?.close(); } catch(e) {}
-  gyroDC = null; eventDC = null; pc = null;
-}
+socket.on('controller_connected', (info) => {
+  // Back-compat: old controllers send no payload, new ones send { playerId, slot }.
+  const playerId = info?.playerId || `legacy-${Date.now()}`;
+  const slot = info?.slot || 1;
+  getOrCreatePlayer(playerId, slot);
+  statusEl.textContent = `Player ${slot} connected — Point & Shoot`;
+  statusEl.style.color = '#4caf50';
+  // Start WebRTC negotiation with this specific controller.
+  setupRTCFor(playerId);
+});
 
-function setupRTC() {
-  teardownRTC();
-  pc = new RTCPeerConnection({
+socket.on('controller_disconnected', (info) => {
+  const playerId = info?.playerId;
+  if (!playerId) return;
+  const p = players.get(playerId);
+  if (!p) return;
+  destroyPlayer(p);
+  players.delete(playerId);
+  renderPlayerScores();
+  if (players.size === 0) {
+    statusEl.textContent = 'Waiting for controller…';
+    statusEl.style.color = '';
+  }
+});
+
+// ---------------- WebRTC peer connection (screen = offerer, one per peer) ----------------
+function setupRTCFor(playerId) {
+  const p = players.get(playerId);
+  if (!p) return;
+  // Tear down any previous PC for this player (e.g. on reconnect).
+  try { p.gyroDC?.close(); } catch(e) {}
+  try { p.eventDC?.close(); } catch(e) {}
+  try { p.pc?.close(); } catch(e) {}
+
+  p.pc = new RTCPeerConnection({
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
     ],
   });
 
-  // Create channels BEFORE the offer so they end up in the SDP.
-  gyroDC = pc.createDataChannel('gyro', { ordered: false, maxRetransmits: 0 });
-  eventDC = pc.createDataChannel('events', { ordered: true });
+  p.gyroDC = p.pc.createDataChannel('gyro', { ordered: false, maxRetransmits: 0 });
+  p.eventDC = p.pc.createDataChannel('events', { ordered: true });
 
-  gyroDC.onopen = () => setRtcStatus(true);
-  gyroDC.onclose = () => setRtcStatus(false);
-  gyroDC.onmessage = (e) => {
-    // Hot path — forward to shared apply fn so stale-packet rejection
-    // also covers WebRTC (unreliable, unordered) traffic.
-    const fn = window.__applyGyro;
-    if (fn) fn(JSON.parse(e.data));
+  p.gyroDC.onopen = () => setRtcStatusForPlayer(p, true);
+  p.gyroDC.onclose = () => setRtcStatusForPlayer(p, false);
+  p.gyroDC.onmessage = (e) => {
+    // Stamp the playerId before applying so stale-rejection works per-player.
+    const data = JSON.parse(e.data);
+    data.playerId = playerId;
+    applyGyro(data);
   };
 
-  eventDC.onmessage = (e) => {
+  p.eventDC.onmessage = (e) => {
     const d = JSON.parse(e.data);
     switch (d.type) {
-      case 'trigger': fireShot(); break;
+      case 'trigger': fireShot(playerId); break;
       case 'calib_start':
         $('calib-overlay').style.display = 'flex';
         break;
       case 'calib_state':
         $('calib-overlay').style.display = 'flex';
-        $('calib-overlay-title').textContent = d.title;
+        $('calib-overlay-title').textContent = `${PLAYER_COLORS[p.slot].label}: ${d.title}`;
         $('calib-overlay-sub').textContent = d.sub;
         break;
       case 'calib_done':
@@ -216,30 +330,34 @@ function setupRTC() {
     }
   };
 
-  pc.onicecandidate = (e) => {
-    if (e.candidate) socket.emit('rtc_signal', { roomCode, ice: e.candidate });
+  p.pc.onicecandidate = (e) => {
+    if (e.candidate) socket.emit('rtc_signal', { roomCode, to: playerId, ice: e.candidate });
   };
 
-  pc.onconnectionstatechange = () => {
-    if (!pc) return;
-    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-      setRtcStatus(false);
+  p.pc.onconnectionstatechange = () => {
+    if (!p.pc) return;
+    if (p.pc.connectionState === 'failed' || p.pc.connectionState === 'disconnected') {
+      setRtcStatusForPlayer(p, false);
     }
   };
 
-  pc.createOffer()
-    .then(offer => pc.setLocalDescription(offer))
-    .then(() => socket.emit('rtc_signal', { roomCode, sdp: pc.localDescription }))
+  p.pc.createOffer()
+    .then(offer => p.pc.setLocalDescription(offer))
+    .then(() => socket.emit('rtc_signal', { roomCode, to: playerId, sdp: p.pc.localDescription }))
     .catch(err => console.warn('RTC offer failed:', err));
 }
 
 socket.on('rtc_signal', async (msg) => {
-  if (!pc) return;
+  // Route incoming signaling to the correct peer's PC by `from` (sender id).
+  const fromId = msg.from;
+  if (!fromId) return;
+  const p = players.get(fromId);
+  if (!p?.pc) return;
   try {
     if (msg.sdp && msg.sdp.type === 'answer') {
-      await pc.setRemoteDescription(msg.sdp);
+      await p.pc.setRemoteDescription(msg.sdp);
     } else if (msg.ice) {
-      await pc.addIceCandidate(msg.ice);
+      await p.pc.addIceCandidate(msg.ice);
     }
   } catch (err) {
     console.warn('RTC signal handle failed:', err);
@@ -1561,22 +1679,7 @@ function spawnDuckWave() {
 
 // Initial spawn is handled by the animate loop
 
-// --------------------------- Laser Sight & Firing --------------------
-const laserDotMat = new THREE.MeshBasicMaterial({ color: 0xcc0000, depthTest: false });
-const laserDot = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 16), laserDotMat);
-laserDot.renderOrder = 999; scene.add(laserDot);
-
-const haloMat = new THREE.MeshBasicMaterial({ color: 0x220000, transparent: true, opacity: 0.7, depthWrite: false, depthTest: false });
-const laserHalo = new THREE.Mesh(new THREE.SphereGeometry(0.65, 16, 16), haloMat);
-laserHalo.renderOrder = 998; scene.add(laserHalo);
-
-const beamMat = new THREE.MeshBasicMaterial({ color: 0xff1122, transparent: true, opacity: 0.15, depthWrite: false });
-const beamGeo = new THREE.CylinderGeometry(0.05, 0.05, 1, 8, 1, true);
-beamGeo.translate(0, 0.5, 0);
-const beam = new THREE.Mesh(beamGeo, beamMat);
-beam.renderOrder = 997; scene.add(beam);
-
-const aim = { nx: 0, ny: 0, sx: 0, sy: 0 };
+// --------------------------- Laser Sight & Firing (multi-player) ----
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
 
@@ -1584,57 +1687,65 @@ const ndc = new THREE.Vector2();
 // (UDP-like) so out-of-order packets are normal. We accept a packet only
 // if its seq is newer than the last one we applied — this prevents the
 // crosshair from "jumping back" to a stale position.
-let lastGyroSeq = -1;
-const SEQ_MOD = 1 << 16; // seq is a 16-bit rolling counter from the phone
+const SEQ_MOD = 1 << 16; // 16-bit rolling counter from the phone
 function isNewerSeq(incoming, previous) {
-  // Circular comparison: treat half the range as "newer".
   const diff = ((incoming - previous) + SEQ_MOD) % SEQ_MOD;
   return diff !== 0 && diff < SEQ_MOD / 2;
 }
 
 function applyGyro(data) {
   if (!Number.isFinite(data?.nx) || !Number.isFinite(data?.ny)) return;
+  // Resolve player. Prefer explicit playerId; fall back to single-player.
+  const id = data.playerId || (players.size === 1 ? Array.from(players.keys())[0] : null);
+  if (!id) return;
+  const p = players.get(id);
+  // If the player isn't registered yet (controller_connected hasn't fired),
+  // drop the packet — the next one will arrive fast enough on a 60 Hz feed.
+  if (!p) return;
   if (Number.isFinite(data.seq)) {
-    if (lastGyroSeq >= 0 && !isNewerSeq(data.seq, lastGyroSeq)) return; // stale, drop
-    lastGyroSeq = data.seq;
+    if (p.lastSeq >= 0 && !isNewerSeq(data.seq, p.lastSeq)) return; // stale, drop
+    p.lastSeq = data.seq;
   }
-  aim.nx = data.nx; aim.ny = data.ny;
+  p.aim.nx = data.nx; p.aim.ny = data.ny;
   pktCount++;
 }
 
-// Hook both transports into the same apply function. WebRTC gyro channel
-// (in setupRTC above) also calls applyGyro now.
+// Server relay path (when WebRTC isn't established yet or has dropped).
 socket.on('gyro_data', applyGyro);
-// Expose for the WebRTC data-channel handler to use:
-window.__applyGyro = applyGyro;
 
-socket.on('trigger', () => fireShot());
+// Trigger via server relay. New format includes playerId; old format is just `()`.
+socket.on('trigger', (info) => {
+  const id = info?.playerId || (players.size === 1 ? Array.from(players.keys())[0] : null);
+  fireShot(id);
+});
 
 function updateLaser() {
-  // Faster lerp for better responsiveness (was 0.55)
-  aim.sx = THREE.MathUtils.lerp(aim.sx, aim.nx, 0.75);
-  aim.sy = THREE.MathUtils.lerp(aim.sy, aim.ny, 0.75);
+  // Update each player's laser sight. Smooth via lerp toward latest aim.
+  for (const p of players.values()) {
+    p.aim.sx = THREE.MathUtils.lerp(p.aim.sx, p.aim.nx, 0.75);
+    p.aim.sy = THREE.MathUtils.lerp(p.aim.sy, p.aim.ny, 0.75);
 
-  ndc.set(THREE.MathUtils.clamp(aim.sx, -1, 1), THREE.MathUtils.clamp(aim.sy, -1, 1));
-  raycaster.setFromCamera(ndc, camera);
+    ndc.set(THREE.MathUtils.clamp(p.aim.sx, -1, 1), THREE.MathUtils.clamp(p.aim.sy, -1, 1));
+    raycaster.setFromCamera(ndc, camera);
 
-  const duckMeshes = [];
-  ducks.forEach(d => d.traverse(o => { if (o.isMesh) duckMeshes.push(o); }));
-  
-  // Raycast against terrain, water, and ducks
-  const hits = raycaster.intersectObjects([terrain, water, ...duckMeshes], false);
-  let pt = raycaster.ray.origin.clone().add(raycaster.ray.direction.clone().multiplyScalar(400));
-  if (hits.length > 0) pt = hits[0].point;
+    const duckMeshes = [];
+    ducks.forEach(d => d.traverse(o => { if (o.isMesh) duckMeshes.push(o); }));
+    const hits = raycaster.intersectObjects([terrain, water, ...duckMeshes], false);
+    let pt = raycaster.ray.origin.clone().add(raycaster.ray.direction.clone().multiplyScalar(400));
+    if (hits.length > 0) pt = hits[0].point;
 
-  laserDot.position.copy(pt);
-  laserHalo.position.copy(pt);
+    p.sights.dot.position.copy(pt);
+    p.sights.halo.position.copy(pt);
 
-  // Barrel offset from camera
-  const barrel = camera.localToWorld(new THREE.Vector3(1, -1, -2));
-  beam.position.copy(barrel);
-  const dir = pt.clone().sub(barrel);
-  beam.scale.set(1, dir.length(), 1);
-  beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+    // Each player's beam emits from a slightly different barrel offset so
+    // they don't perfectly overlap (P1 right of camera, P2 left).
+    const xOff = p.slot === 2 ? -1 : 1;
+    const barrel = camera.localToWorld(new THREE.Vector3(xOff, -1, -2));
+    p.sights.beam.position.copy(barrel);
+    const dir = pt.clone().sub(barrel);
+    p.sights.beam.scale.set(1, dir.length(), 1);
+    p.sights.beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+  }
 }
 
 const feathers = [];
@@ -1761,44 +1872,44 @@ function playMechSound(freq, dur) {
 
 let recoilPhase = 0;
 
-function fireShot() {
+function fireShot(playerId) {
+  // Resolve which player is firing. Fallback to slot 1 if unknown.
+  const p = (playerId && players.get(playerId))
+    || (players.size === 1 ? Array.from(players.values())[0] : null);
+  if (!p) return; // no players connected, nothing to shoot
+
+  // Aggregate counters (kept for badges/HUD compatibility).
   shots++; $('shots').textContent = String(shots);
+  // Per-player counter
+  p.shots++;
+
   playShotgunSound();
-  
-  // Recoil Trigger
   recoilPhase = 1.0;
-  
-  // Trigger particle effects
   triggerMuzzleFlash();
-  
+
   // Screen flash overlay
   const flash = document.createElement('div');
   flash.style.cssText = 'position:fixed;inset:0;background:rgba(255,240,200,0.4);pointer-events:none;z-index:8;transition: background 0.2s ease-out; mix-blend-mode: hard-light;';
   document.body.appendChild(flash);
-  
-  requestAnimationFrame(() => {
-    flash.style.background = 'rgba(0,0,0,0)';
-  });
-  
+  requestAnimationFrame(() => { flash.style.background = 'rgba(0,0,0,0)'; });
   setTimeout(() => flash.remove(), 250);
 
-  ndc.set(THREE.MathUtils.clamp(aim.sx, -1, 1), THREE.MathUtils.clamp(aim.sy, -1, 1));
+  // Use THIS player's aim, not a global.
+  ndc.set(THREE.MathUtils.clamp(p.aim.sx, -1, 1), THREE.MathUtils.clamp(p.aim.sy, -1, 1));
   raycaster.setFromCamera(ndc, camera);
 
   let hitDuck = null;
   let minHitDist = Infinity;
-  
-  // 1. Check exact mesh intersections first
+
+  // 1. Exact mesh intersection first
   const duckMeshes = [];
   ducks.forEach(d => { if (d.userData.alive) d.traverse(o => { if (o.isMesh) duckMeshes.push(o); }); });
   const exactHits = raycaster.intersectObjects(duckMeshes, false);
-  
+
   if (exactHits.length > 0) {
     hitDuck = exactHits[0].object.userData.duck;
   } else {
-    // 2. If no exact hit, use an "aim assist" thick radius
-    // We check the distance from the ray to the center of each duck.
-    // A radius of 3.5 world units gives a nice forgiving hitbox.
+    // 2. Aim-assist thick radius (forgiving hitbox)
     for (const d of ducks) {
       if (!d.userData.alive) continue;
       const dist = Math.sqrt(raycaster.ray.distanceSqToPoint(d.position));
@@ -1808,18 +1919,27 @@ function fireShot() {
       }
     }
   }
-  
+
   if (hitDuck) {
+    // First shot to land wins (shared duck pool, race for kills).
+    // Mark duck dead immediately so the other player's concurrent shot
+    // doesn't double-score.
+    if (!hitDuck.userData.alive) return;
+
     hits++; $('hits').textContent = String(hits);
     score += 500; $('score').textContent = String(score);
-    
-    // Track longest shot
+
+    p.hits++;
+    p.score += 500;
+    renderPlayerScores();
+    showKillBanner(p.slot);
+
     const dist = camera.position.distanceTo(hitDuck.position);
     if (dist > longestShot) {
       longestShot = dist;
       $('longest-shot').textContent = Math.floor(longestShot) + 'm';
     }
-    
+
     explodeDuck(hitDuck);
   }
 }

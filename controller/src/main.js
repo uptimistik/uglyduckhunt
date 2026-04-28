@@ -601,10 +601,17 @@ async function onConnect() {
     connBadge.textContent = 'No Screen';
     connBadge.className = 'badge bad';
   });
-  state.socket.on('join_ok', () => {
+  state.socket.on('join_ok', (info) => {
+    // info: { roomCode, playerId, slot, screenId }
+    if (info && typeof info === 'object') {
+      state.playerId = info.playerId;
+      state.slot = info.slot;
+      state.screenId = info.screenId;
+    }
+    const slotLabel = state.slot ? ` — Player ${state.slot}` : '';
     playStatus.textContent = state.hasEverConnected
-      ? 'Reconnected. Ready to shoot.'
-      : 'Connected. Aim where you want the center to be, then tap Calibrate.';
+      ? `Reconnected${slotLabel}. Ready to shoot.`
+      : `Connected${slotLabel}. Aim where you want the center to be, then tap Calibrate.`;
   });
   // Low-rate relay liveness check — replaces the per-packet ack to cut WAN traffic.
   if (state.relayPingTimer) clearInterval(state.relayPingTimer);
@@ -634,7 +641,8 @@ async function onConnect() {
     // Always (re)join the room — both on first connect AND on every reconnect.
     state.socket.emit('join_room', state.roomCode);
     state.connected = true;
-    connBadge.textContent = `Room ${state.roomCode}`; connBadge.className = 'badge ok';
+    connBadge.textContent = state.slot ? `P${state.slot} · ${state.roomCode}` : `Room ${state.roomCode}`;
+    connBadge.className = 'badge ok';
     setupCard.classList.add('hidden');
 
     if (!state.volumeTriggersSetup) {
@@ -662,12 +670,18 @@ async function onConnect() {
   // our 'join_room'. We just answer and wire up the channels.
   state.socket.on('rtc_signal', async (msg) => {
     try {
+      // Remember the screen's socket id so we can address replies directly.
+      if (msg.from) state.screenId = msg.from;
       if (msg.sdp && msg.sdp.type === 'offer') {
         ensureRTC();
         await state.pc.setRemoteDescription(msg.sdp);
         const answer = await state.pc.createAnswer();
         await state.pc.setLocalDescription(answer);
-        state.socket.emit('rtc_signal', { roomCode: state.roomCode, sdp: state.pc.localDescription });
+        state.socket.emit('rtc_signal', {
+          roomCode: state.roomCode,
+          to: state.screenId,
+          sdp: state.pc.localDescription,
+        });
       } else if (msg.ice && state.pc) {
         try { await state.pc.addIceCandidate(msg.ice); } catch(e) {}
       }
@@ -692,7 +706,11 @@ function ensureRTC() {
 
   state.pc.onicecandidate = (e) => {
     if (e.candidate && state.socket?.connected) {
-      state.socket.emit('rtc_signal', { roomCode: state.roomCode, ice: e.candidate });
+      state.socket.emit('rtc_signal', {
+        roomCode: state.roomCode,
+        to: state.screenId,
+        ice: e.candidate,
+      });
     }
   };
 
@@ -702,12 +720,11 @@ function ensureRTC() {
       state.gyroDC = dc;
       dc.onopen = () => {
         playStatus.textContent = 'P2P direct link active — minimal lag.';
-        connBadge.textContent = `P2P · ${state.roomCode}`;
+        const slotLabel = state.slot ? `P${state.slot}` : 'P2P';
+        connBadge.textContent = `${slotLabel} · ${state.roomCode}`;
       };
       dc.onclose = () => {
-        if (connBadge.textContent.startsWith('P2P')) {
-          connBadge.textContent = `Room ${state.roomCode}`;
-        }
+        connBadge.textContent = state.slot ? `P${state.slot} · ${state.roomCode}` : `Room ${state.roomCode}`;
       };
     } else if (dc.label === 'events') {
       state.eventDC = dc;
