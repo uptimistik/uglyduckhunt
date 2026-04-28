@@ -46,6 +46,8 @@ const state = {
   lastEmitAt: 0,
   filt: { x: 0, y: 0, dx: 0, dy: 0, lastT: 0, primed: false },
   lastRaw: { alpha: 0, beta: 0, gamma: 0 },
+  // Hybrid Fusion: gyro deltas + orientation absolute
+  fusion: { nx: 0, ny: 0, lastMotionT: 0 },
   invalidOrientationCount: 0,
   invalidEmitCount: 0,
   relayOkCount: 0,
@@ -175,8 +177,8 @@ function attachSensorListeners() {
   window.addEventListener('deviceorientation', onOrientation, true);
   // Some platforms use deviceorientationabsolute. Listen to both.
   window.addEventListener('deviceorientationabsolute', onOrientation, true);
-  // We don't need devicemotion for tracking, but we count it to confirm sensors work at all.
-  window.addEventListener('devicemotion', () => { state.motionCount++; }, true);
+  // RAW GYRO: provides instantaneous deltas for 'zero lag' feel.
+  window.addEventListener('devicemotion', onMotion, true);
 
   // Debug: log sensor listener attachment
   console.log('[Sensors] Attached listeners for deviceorientation, deviceorientationabsolute, devicemotion');
@@ -223,6 +225,48 @@ function onOrientation(e) {
   }
   state.qNow = qCandidate;
 
+  // Drift Correction: Slowly pull the hybrid position toward the absolute fused position.
+  if (state.qBase) {
+    const { yaw, pitch } = relativeYawPitch();
+    const absNX = mapToNormalized(yaw,   state.calib.yawLeft,   state.calib.yawRight);
+    const absNY = mapToNormalized(pitch, state.calib.pitchDown, state.calib.pitchUp);
+    
+    // Low-pass pull: 2% absolute, 98% current (gyro-accumulated)
+    state.fusion.nx = state.fusion.nx * 0.98 + absNX * 0.02;
+    state.fusion.ny = state.fusion.ny * 0.98 + absNY * 0.02;
+  }
+
+  emit();
+}
+
+function onMotion(e) {
+  state.motionCount++;
+  const now = performance.now();
+  const dt = (now - (state.fusion.lastMotionT || now)) / 1000;
+  state.fusion.lastMotionT = now;
+
+  if (dt <= 0 || dt > 0.1) return;
+
+  const rot = e.rotationRate;
+  if (!rot || !Number.isFinite(rot.alpha) || !Number.isFinite(rot.beta) || !Number.isFinite(rot.gamma)) return;
+
+  // RotationRate is rad/s. On iOS/Android: 
+  // alpha = Z (yaw), beta = X (pitch), gamma = Y (roll)
+  // For 'Gun Mode' (top edge pointing at screen):
+  // rotation around X (beta) -> Pitch (up/down)
+  // rotation around Z (alpha) -> Yaw (left/right)
+  
+  // These deltas are INSTANT (zero OS filter lag).
+  const dyaw   = -rot.alpha * (Math.PI / 180) * dt; 
+  const dpitch = -rot.beta  * (Math.PI / 180) * dt;
+
+  // Convert angular delta to normalized NDC delta using current calibration scale.
+  const yawRange   = Math.abs(state.calib.yawRight - state.calib.yawLeft) || (DEFAULT_HALF * 2);
+  const pitchRange = Math.abs(state.calib.pitchUp  - state.calib.pitchDown) || (DEFAULT_HALF * 2);
+
+  state.fusion.nx = clamp(state.fusion.nx + (dyaw   / yawRange)   * 2, -1.2, 1.2);
+  state.fusion.ny = clamp(state.fusion.ny + (dpitch / pitchRange) * 2, -1.2, 1.2);
+  
   emit();
 }
 
@@ -328,9 +372,8 @@ function emit() {
 
   let nx, ny;
   if (state.qBase) {
-    const { yaw, pitch } = relativeYawPitch();
-    nx = mapToNormalized(yaw,   state.calib.yawLeft,   state.calib.yawRight); // -1 at left, +1 at right
-    ny = mapToNormalized(pitch, state.calib.pitchDown, state.calib.pitchUp);   // -1 at bottom, +1 at top
+    nx = state.fusion.nx;
+    ny = state.fusion.ny;
   } else {
     nx = 0; ny = 0;
   }
@@ -724,7 +767,11 @@ function ensureRTC() {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' },
     ],
+    iceCandidatePoolSize: 10,
   });
   state.gyroDC = null;
   state.eventDC = null;
