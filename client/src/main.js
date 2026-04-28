@@ -496,6 +496,44 @@ if (SpeechRecognition) {
   $('voice-status').textContent = 'Voice API not supported in this browser';
 }
 
+function handleDogCommand(cmd, targetName) {
+  const status = $('voice-status');
+  status.style.color = '#fff';
+  status.style.fontWeight = 'bold';
+  setTimeout(() => {
+    status.style.color = '';
+    status.style.fontWeight = '';
+  }, 1000);
+
+  const targetDogs = targetName ? dogs.filter(d => d.name.toLowerCase() === targetName) : dogs;
+  const nameLabel = targetName ? targetName.toUpperCase() : 'All dogs';
+
+  if (cmd === 'sit') {
+    targetDogs.forEach(dog => { if (dog.state === 0) dog.state = 4; });
+    status.textContent = `Acknowledged: ${nameLabel} SIT!`;
+  } else if (cmd === 'fetch') {
+    targetDogs.forEach(dog => { if (dog.state === 4) dog.state = 0; });
+    status.textContent = `Acknowledged: ${nameLabel} FETCH!`;
+  } else if (cmd === 'good boy') {
+    if (treatsInPouch <= 0) {
+      status.textContent = 'Pouch empty! Wait for more treats...';
+      return;
+    }
+    
+    treatsInPouch--;
+    commandsUsed++;
+    checkAchievements();
+    
+    targetDogs.forEach(dog => {
+      dog.happiness = Math.min(100, dog.happiness + 15);
+      dog.baseSpeed += 1.2;
+    });
+    
+    triggerTreatEffect();
+    status.textContent = `Acknowledged: GOOD BOY ${nameLabel}! ❤️`;
+  }
+}
+
 // --------------------------- Game Flow -----------------------------
 function startGame(mode) {
   gameState = 'PLAYING';
