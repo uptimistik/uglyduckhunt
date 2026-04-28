@@ -128,17 +128,25 @@ io.on('connection', (socket) => {
   });
 
   socket.on('recalibrate', (roomCode) => {
+    // Tell everyone in the room to recalibrate (Global reset)
     socket.to(roomCode).emit('recalibrate');
     console.log(`Recalibrate request from ${socket.id} in room ${roomCode}`);
   });
 
   socket.on('calib_start', (roomCode) => {
+    // Screen tells a specific controller to start calibration
+    // In this flow, we usually emit from screen to a specific playerId
     socket.to(roomCode).emit('calib_start');
   });
 
   socket.on('calib_state', (data) => {
-    const { roomCode, ...payload } = data;
-    socket.to(roomCode).emit('calib_state', payload);
+    const { roomCode, to, ...payload } = data;
+    // Target the specific device (Screen -> Controller or vice versa)
+    if (to) {
+      io.to(to).emit('calib_state', payload);
+    } else {
+      socket.to(roomCode).emit('calib_state', payload);
+    }
   });
 
   socket.on('calib_done', (roomCode) => {
@@ -146,8 +154,13 @@ io.on('connection', (socket) => {
   });
 
   // Relay calibration_complete from screen back to controller
-  socket.on('calibration_complete', (roomCode) => {
-    socket.to(roomCode).emit('calibration_complete');
+  socket.on('calibration_complete', (data) => {
+    const { roomCode, to } = data;
+    if (to) {
+      io.to(to).emit('calibration_complete');
+    } else {
+      socket.to(roomCode).emit('calibration_complete');
+    }
   });
 
   socket.on('disconnect', () => {

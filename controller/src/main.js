@@ -427,7 +427,7 @@ function sendEvent(type, payload) {
   } else if (type === 'calib_done') {
     state.socket.emit('calib_done', state.roomCode);
   } else if (type === 'calib_state') {
-    state.socket.emit('calib_state', { roomCode: state.roomCode, ...(payload || {}) });
+    state.socket.emit('calib_state', { roomCode: state.roomCode, to: state.screenId, ...(payload || {}) });
   }
 }
 

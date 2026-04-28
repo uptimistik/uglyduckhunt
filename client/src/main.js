@@ -19,9 +19,12 @@ document.querySelector('#app').innerHTML = `
         <div class="title">ROOM</div>
         <div class="big" id="room-code">----</div>
       </div>
-      <div class="panel center"><div id="status">Waiting for controller…</div></div>
+      <div class="panel center">
+        <div id="status">Waiting for controller…</div>
+        <div id="timer" style="display:none; font-size:24px; margin-left:20px; color:#fff;">01:30</div>
+      </div>
       <div class="panel">
-        <div class="title">SCORE</div>
+        <div class="title">TOTAL SCORE</div>
         <div class="big" id="score">0</div>
       </div>
     </div>
@@ -69,9 +72,26 @@ document.querySelector('#app').innerHTML = `
     <div id="crosshair"></div>
     <div id="kill-banner"></div>
   </div>
-  <div id="calib-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.9); z-index:10; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding: 40px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;">
+  <div id="calib-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.9); z-index:100; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding: 40px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;">
     <h1 id="calib-overlay-title" style="font-size:48px; margin-bottom:30px; color:#ff9d00;">Calibration</h1>
     <p id="calib-overlay-sub" style="font-size:24px; max-width:800px; line-height:1.5; color:#eee;">Please follow the instructions on your phone.</p>
+    <div id="calib-player-indicator" style="margin-top:20px; font-size:18px; color:#888;"></div>
+  </div>
+
+  <div id="menu-overlay" style="position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:200; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
+    <h1 style="font-size:64px; color:#ff9d00; margin-bottom:10px; letter-spacing:4px;">UGLY DUCK HUNT</h1>
+    <p style="color:#aaa; margin-bottom:40px;">WETLANDS ECOSYSTEM — MULTIPLAYER EDITION</p>
+    <div style="display:flex; gap:20px;">
+      <button id="btn-relax" class="menu-btn">RELAX MODE<br><small>Infinite Time · Practice</small></button>
+      <button id="btn-pvp" class="menu-btn">PvP BATTLE<br><small>2 Players · 1:30 Limit</small></button>
+    </div>
+    <div id="menu-conn-status" style="margin-top:40px; font-size:14px; color:#666;">Waiting for controllers...</div>
+  </div>
+
+  <div id="game-over-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.9); z-index:300; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
+    <h1 id="go-title" style="font-size:72px; color:#ff9d00;">TIME'S UP!</h1>
+    <div id="go-results" style="margin:40px 0; display:flex; gap:60px;"></div>
+    <button id="btn-restart" class="menu-btn">BACK TO MENU</button>
   </div>
 `;
 
@@ -123,11 +143,22 @@ css.textContent = `
   .pscore.p1 .label { color:#ff5252; }
   .pscore.p2 .label { color:#42a5f5; }
 
+  /* Menu Buttons */
+  .menu-btn { background:rgba(255,255,255,0.05); border:2px solid rgba(255,255,255,0.1); color:#fff; padding:20px 40px; border-radius:12px; font-size:18px; font-weight:800; cursor:pointer; transition:0.3s; pointer-events:auto; text-transform:uppercase; line-height:1.2; }
+  .menu-btn:hover { background:rgba(255,157,0,0.2); border-color:#ff9d00; transform:scale(1.05); }
+  .menu-btn small { font-size:11px; font-weight:400; color:#aaa; display:block; margin-top:5px; }
+
   /* Kill banner */
   #kill-banner { position:fixed; top:90px; left:50%; transform:translateX(-50%) translateY(-40px); padding:10px 24px; border-radius:24px; font-weight:800; font-size:14px; letter-spacing:1px; opacity:0; transition:0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); pointer-events:none; z-index:50; }
   #kill-banner.show { transform:translateX(-50%) translateY(0); opacity:1; }
   #kill-banner.p1 { background:rgba(255,82,82,0.95); color:#fff; box-shadow:0 0 24px rgba(255,82,82,0.6); }
   #kill-banner.p2 { background:rgba(66,165,245,0.95); color:#fff; box-shadow:0 0 24px rgba(66,165,245,0.6); }
+
+  #go-results .result-card { background:rgba(255,255,255,0.03); padding:30px; border-radius:16px; border:1px solid rgba(255,255,255,0.1); min-width:200px; }
+  #go-results .result-card.winner { border-color:#ff9d00; background:rgba(255,157,0,0.1); box-shadow:0 0 40px rgba(255,157,0,0.2); }
+  #go-results .res-slot { font-size:14px; color:#aaa; margin-bottom:10px; }
+  #go-results .res-score { font-size:48px; font-weight:800; }
+  #go-results .res-label { font-size:12px; color:#888; text-transform:uppercase; margin-top:5px; }
 `;
 document.head.appendChild(css);
 
@@ -141,6 +172,11 @@ let unlockedBadges = new Set();
 let treatsInPouch = 3, refillTimer = 0;
 const MAX_TREATS = 3, REFILL_COOLDOWN = 15;
 let dogs = [];
+
+let gameState = 'MENU'; // MENU, PLAYING, GAMEOVER
+let gameMode = 'RELAX'; // RELAX, PVP
+let gameTimer = 90;
+let timerInterval = null;
 
 const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
 $('room-code').textContent = roomCode;
@@ -278,11 +314,20 @@ socket.on('controller_disconnected', (info) => {
   destroyPlayer(p);
   players.delete(playerId);
   renderPlayerScores();
+  updateMenuConnStatus();
   if (players.size === 0) {
     statusEl.textContent = 'Waiting for controller…';
     statusEl.style.color = '';
   }
 });
+
+function updateMenuConnStatus() {
+  const count = players.size;
+  const el = $('menu-conn-status');
+  if (count === 0) el.textContent = 'Waiting for controllers...';
+  else if (count === 1) el.textContent = 'Player 1 Connected. Waiting for Player 2 for PvP...';
+  else el.textContent = '2 Players Connected. Ready for PvP Battle!';
+}
 
 // ---------------- WebRTC peer connection (screen = offerer, one per peer) ----------------
 function setupRTCFor(playerId) {
@@ -366,18 +411,32 @@ socket.on('rtc_signal', async (msg) => {
 
 // Server-relayed fallbacks. These still work if WebRTC negotiation fails
 // (e.g. symmetric NAT with no reachable STUN), so the game never breaks.
-socket.on('calib_start', () => {
+socket.on('calib_start', (data) => {
+  // If data has a playerId, we can show which player is calibrating
+  const p = data?.playerId ? players.get(data.playerId) : null;
+  const label = p ? `Player ${p.slot}` : '';
   $('calib-overlay').style.display = 'flex';
+  $('calib-player-indicator').textContent = label;
 });
 
 socket.on('calib_state', (data) => {
+  // data: { title, sub, playerId? }
   $('calib-overlay').style.display = 'flex';
   $('calib-overlay-title').textContent = data.title;
   $('calib-overlay-sub').textContent = data.sub;
+  if (data.playerId) {
+    const p = players.get(data.playerId);
+    if (p) $('calib-player-indicator').textContent = `Player ${p.slot}`;
+  }
 });
 
-socket.on('calib_done', () => {
+socket.on('calib_done', (data) => {
   $('calib-overlay').style.display = 'none';
+  // IMPORTANT: Tell THIS specific controller that calibration is complete
+  // so it exits its local calibration wizard and enters play mode.
+  if (data?.playerId) {
+    socket.emit('calibration_complete', { roomCode, to: data.playerId });
+  }
 });
 
 // --------------------------- Voice Recognition -----------------------
@@ -437,43 +496,101 @@ if (SpeechRecognition) {
   $('voice-status').textContent = 'Voice API not supported in this browser';
 }
 
-function handleDogCommand(cmd, targetName) {
-  const status = $('voice-status');
-  status.style.color = '#fff';
-  status.style.fontWeight = 'bold';
-  setTimeout(() => {
-    status.style.color = '';
-    status.style.fontWeight = '';
-  }, 1000);
+// --------------------------- Game Flow -----------------------------
+function startGame(mode) {
+  gameState = 'PLAYING';
+  gameMode = mode;
+  score = 0; hits = 0; shots = 0; wave = 1;
+  players.forEach(p => { p.score = 0; p.hits = 0; p.shots = 0; });
+  
+  $('score').textContent = '0';
+  $('hits').textContent = '0';
+  $('shots').textContent = '0';
+  $('wave').textContent = '1';
+  renderPlayerScores();
 
-  const targetDogs = targetName ? dogs.filter(d => d.name.toLowerCase() === targetName) : dogs;
-  const nameLabel = targetName ? targetName.toUpperCase() : 'All dogs';
+  $('menu-overlay').style.display = 'none';
+  $('game-over-overlay').style.display = 'none';
 
-  if (cmd === 'sit') {
-    targetDogs.forEach(dog => { if (dog.state === 0) dog.state = 4; });
-    status.textContent = `Acknowledged: ${nameLabel} SIT!`;
-  } else if (cmd === 'fetch') {
-    targetDogs.forEach(dog => { if (dog.state === 4) dog.state = 0; });
-    status.textContent = `Acknowledged: ${nameLabel} FETCH!`;
-  } else if (cmd === 'good boy') {
-    if (treatsInPouch <= 0) {
-      status.textContent = 'Pouch empty! Wait for more treats...';
-      return;
-    }
-    
-    treatsInPouch--;
-    commandsUsed++;
-    checkAchievements();
-    
-    targetDogs.forEach(dog => {
-      dog.happiness = Math.min(100, dog.happiness + 15);
-      dog.baseSpeed += 1.2;
-    });
-    
-    triggerTreatEffect();
-    status.textContent = `Acknowledged: GOOD BOY ${nameLabel}! ❤️`;
+  if (mode === 'PVP') {
+    gameTimer = 90;
+    $('timer').style.display = 'block';
+    updateTimerUI();
+    if (timerInterval) clearInterval(timerInterval);
+    timerInterval = setInterval(tickTimer, 1000);
+  } else {
+    $('timer').style.display = 'none';
   }
 }
+
+function tickTimer() {
+  gameTimer--;
+  updateTimerUI();
+  if (gameTimer <= 0) {
+    endGame();
+  }
+}
+
+function updateTimerUI() {
+  const m = Math.floor(gameTimer / 60);
+  const s = gameTimer % 60;
+  $('timer').textContent = `${m}:${s.toString().padStart(2, '0')}`;
+  if (gameTimer <= 10) $('timer').style.color = '#ff5252';
+  else $('timer').style.color = '#fff';
+}
+
+function endGame() {
+  gameState = 'GAMEOVER';
+  if (timerInterval) clearInterval(timerInterval);
+  $('game-over-overlay').style.display = 'flex';
+  
+  const results = $('go-results');
+  results.innerHTML = '';
+  
+  const playerList = Array.from(players.values()).sort((a, b) => a.slot - b.slot);
+  let maxScore = -1;
+  let winner = null;
+  
+  playerList.forEach(p => {
+    if (p.score > maxScore) {
+      maxScore = p.score;
+      winner = p;
+    } else if (p.score === maxScore) {
+      winner = null; // Tie
+    }
+  });
+
+  playerList.forEach(p => {
+    const card = document.createElement('div');
+    card.className = `result-card ${winner === p ? 'winner' : ''}`;
+    card.innerHTML = `
+      <div class="res-slot" style="color:${p.colors.hex}">PLAYER ${p.slot}</div>
+      <div class="res-score">${p.score}</div>
+      <div class="res-label">${winner === p ? 'WINNER' : 'SCORE'}</div>
+    `;
+    results.appendChild(card);
+  });
+
+  if (gameMode === 'PVP') {
+    $('go-title').textContent = winner ? `PLAYER ${winner.slot} WINS!` : "IT'S A TIE!";
+  } else {
+    $('go-title').textContent = 'SESSION ENDED';
+  }
+}
+
+$('btn-relax').addEventListener('click', () => startGame('RELAX'));
+$('btn-pvp').addEventListener('click', () => {
+  if (players.size < 2) {
+    alert('PvP Mode requires 2 players! Please connect another phone.');
+    return;
+  }
+  startGame('PVP');
+});
+$('btn-restart').addEventListener('click', () => {
+  $('game-over-overlay').style.display = 'none';
+  $('menu-overlay').style.display = 'flex';
+  gameState = 'MENU';
+});
 
 // Simulated console commands for testing
 window.dogCmd = handleDogCommand;
@@ -1309,6 +1426,7 @@ class Dog {
 
 
   update(dt, t) {
+    if (gameState !== 'PLAYING') return;
     if (this.state === 0 || this.state === 4) {
       // IDLE or SIT
       let target = this.homePos.clone();
@@ -1873,6 +1991,8 @@ function playMechSound(freq, dur) {
 let recoilPhase = 0;
 
 function fireShot(playerId) {
+  if (gameState !== 'PLAYING') return;
+
   // Resolve which player is firing. Fallback to slot 1 if unknown.
   const p = (playerId && players.get(playerId))
     || (players.size === 1 ? Array.from(players.values())[0] : null);
@@ -1922,22 +2042,25 @@ function fireShot(playerId) {
 
   if (hitDuck) {
     // First shot to land wins (shared duck pool, race for kills).
-    // Mark duck dead immediately so the other player's concurrent shot
-    // doesn't double-score.
     if (!hitDuck.userData.alive) return;
 
     hits++; $('hits').textContent = String(hits);
-    score += 500; $('score').textContent = String(score);
+    
+    // Distance bonus
+    const distToDuck = hitDuck.position.distanceTo(camera.position);
+    const bonus = Math.floor(distToDuck * 5);
+    const points = 500 + bonus;
+    
+    score += points; $('score').textContent = String(score);
 
     p.hits++;
-    p.score += 500;
+    p.score += points;
     renderPlayerScores();
     showKillBanner(p.slot);
 
-    const dist = camera.position.distanceTo(hitDuck.position);
-    if (dist > longestShot) {
-      longestShot = dist;
-      $('longest-shot').textContent = Math.floor(longestShot) + 'm';
+    if (distToDuck > longestShot) {
+      longestShot = Math.floor(distToDuck);
+      $('longest-shot').textContent = `${longestShot}m`;
     }
 
     explodeDuck(hitDuck);
@@ -1953,15 +2076,16 @@ function animate() {
   sharedUniforms.uTime.value = t;
 
   // --- Dynamic Spawning System ---
-  spawnTimer -= dt;
-  if (frenzyCount > 0) {
-    frenzyTimer -= dt;
-    if (frenzyTimer <= 0) {
-      spawnDuckWave();
-      frenzyCount--;
-      frenzyTimer = 0.5 + Math.random() * 1.5;
-    }
-  } else if (spawnTimer <= 0) {
+  if (gameState === 'PLAYING') {
+    spawnTimer -= dt;
+    if (frenzyCount > 0) {
+      frenzyTimer -= dt;
+      if (frenzyTimer <= 0) {
+        spawnDuckWave();
+        frenzyCount--;
+        frenzyTimer = 0.5 + Math.random() * 1.5;
+      }
+    } else if (spawnTimer <= 0) {
     const duckCount = ducks.length;
     const shouldSpawn = duckCount < 5 || (duckCount < 20 && Math.random() > 0.7) || spawnTimer < -15;
     if (shouldSpawn) {
@@ -1981,11 +2105,13 @@ function animate() {
       spawnTimer = nextSpawnDelay;
     }
   }
+}
 
   // Duck Physics
+  const shouldUpdatePhysics = gameState === 'PLAYING';
   for (let i = ducks.length - 1; i >= 0; i--) {
     const d = ducks[i];
-    d.userData.timer += dt;
+    if (shouldUpdatePhysics) d.userData.timer += dt;
     
     // --- Duck Phase Logic (Swimming, Landing, Takeoff) ---
     if (d.userData.phase === 'swim') {
@@ -2034,7 +2160,7 @@ function animate() {
       }
     }
 
-    d.position.addScaledVector(d.userData.vel, dt);
+    if (shouldUpdatePhysics) d.position.addScaledVector(d.userData.vel, dt);
     
     // --- Specialized Animation per Phase ---
     const flapBoost = (d.userData.phase === 'flush' || d.userData.phase === 'takeoff') ? 1.8 : (d.userData.phase === 'climb' ? 1.15 : 0.95);
