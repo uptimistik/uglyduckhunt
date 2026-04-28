@@ -22,21 +22,21 @@ import { CapacitorFlash } from '@capgo/capacitor-flash';
 //  - Touch the aim pad to aim manually if sensors aren't available.
 // ============================================================
 
-const EMIT_HZ = 60;
+const EMIT_HZ = 100;
 const DEFAULT_HALF = 25 * Math.PI / 180; // fallback half-FOV until user calibrates
 const MIN_HALF = 3 * Math.PI / 180;      // safety floor so divisions never blow up
 
 // Adaptive one-euro-style filter parameters. Low cutoff when the user is
 // nearly still (kills jitter) but the cutoff opens up automatically as soon
 // as they aim quickly, so there's almost no lag during fast motion.
-const MIN_CUTOFF = 1.2;   // Hz, baseline cutoff when stationary
-const BETA       = 0.05;  // how aggressively to open the cutoff with speed
+const MIN_CUTOFF = 1.0;   // Hz, baseline cutoff when stationary
+const BETA       = 0.15;  // Higher beta = less lag during fast motion (more responsive)
 const D_CUTOFF   = 1.0;   // Hz, smoothing for the derivative itself
 
 const state = {
   socket: null,
   roomCode: '',
-  serverIP: 'cryptoduckhunt.replit.app',
+  serverIP: localStorage.getItem('custom_ip') || 'cryptoduckhunt.replit.app',
   connected: false,
   qBase: null,
   qNow: { w: 1, x: 0, y: 0, z: 0 },
@@ -781,6 +781,26 @@ document.addEventListener('visibilitychange', () => {
   if (!s) return;
   if (!s.connected) {
     try { s.connect(); } catch(e) {}
+  }
+});
+
+// --- Local IP Discovery / Custom Server (Hidden Feature) ---
+// Triple-tap the header to enter a custom IP (e.g. your Mac's local IP)
+let logoTaps = 0;
+let lastLogoTap = 0;
+document.querySelector('.header').addEventListener('click', () => {
+  const now = Date.now();
+  if (now - lastLogoTap > 1000) logoTaps = 0;
+  logoTaps++;
+  lastLogoTap = now;
+  if (logoTaps >= 3) {
+    logoTaps = 0;
+    const ip = prompt('Enter Local Server IP (e.g. 192.168.1.15):', state.serverIP);
+    if (ip) {
+      state.serverIP = ip;
+      localStorage.setItem('custom_ip', ip);
+      location.reload();
+    }
   }
 });
 window.addEventListener('pageshow', () => {
