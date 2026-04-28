@@ -1865,10 +1865,6 @@ function applyGyro(data) {
   }
   p.aim.nx = data.nx; p.aim.ny = data.ny;
   pktCount++;
-  
-  if (pktCount % 300 === 0) {
-    console.log(`[Gyro] Recv from P${p.slot}. Aim: ${p.aim.nx.toFixed(2)}, ${p.aim.ny.toFixed(2)}`);
-  }
 }
 
 // Server relay path (when WebRTC isn't established yet or has dropped).
