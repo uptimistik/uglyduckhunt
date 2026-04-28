@@ -5,7 +5,7 @@ import './style.css';
 import * as THREE from 'three';
 import { io } from 'socket.io-client';
 
-const socket = io('http://localhost:3000');
+const socket = io('https://cryptoduckhunt.replit.app');
 
 // --------------------------- HUD -------------------------------------
 document.querySelector('#app').innerHTML = `

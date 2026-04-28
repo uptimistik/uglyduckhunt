@@ -36,7 +36,7 @@ const D_CUTOFF   = 1.0;   // Hz, smoothing for the derivative itself
 const state = {
   socket: null,
   roomCode: '',
-  serverIP: '192.168.10.1',
+  serverIP: 'cryptoduckhunt.replit.app',
   connected: false,
   qBase: null,
   qNow: { w: 1, x: 0, y: 0, z: 0 },
@@ -72,7 +72,7 @@ document.querySelector('#app').innerHTML = `
 
     <section class="card" id="setupCard">
       <label>Server IP</label>
-      <input id="ipInput" type="text" value="192.168.10.1" inputmode="decimal" />
+      <input id="ipInput" type="text" value="cryptoduckhunt.replit.app" />
       <label>Room Code</label>
       <input id="roomInput" type="text" placeholder="ABCD" maxlength="6" autocapitalize="characters" />
       <button id="connectBtn" class="primary">Connect</button>
@@ -532,7 +532,14 @@ async function onConnect() {
   await requestSensorPermissions();
 
   setupStatus.textContent = `Connecting to ${state.serverIP}…`;
-  state.socket = io(`http://${state.serverIP}:3000`, {
+  
+  // Smart protocol detection: use https for Replit, http for local IPs
+  const isReplit = state.serverIP.includes('replit.app') || state.serverIP.includes('repl.co');
+  const protocol = isReplit ? 'https' : 'http';
+  const port = isReplit ? '' : ':3000';
+  const finalUrl = `${protocol}://${state.serverIP}${port}`;
+
+  state.socket = io(finalUrl, {
     transports: ['websocket'],
     timeout: 5000,
   });
