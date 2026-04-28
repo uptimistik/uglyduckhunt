@@ -118,6 +118,7 @@ document.querySelector('#app').innerHTML = `
         <summary>Live diagnostics</summary>
         <div class="grid">
           <div><span>orientation events</span><b id="dOri">0</b></div>
+          <div><span>motion events</span><b id="dMot">0</b></div>
           <div><span>α (yaw)</span><b id="dA">—</b></div>
           <div><span>β (pitch)</span><b id="dB">—</b></div>
           <div><span>γ (roll)</span><b id="dG">—</b></div>
