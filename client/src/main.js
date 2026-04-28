@@ -71,6 +71,8 @@ document.querySelector('#app').innerHTML = `
     </div>
     <div id="crosshair"></div>
     <div id="kill-banner"></div>
+    <div id="debug-info" style="position:fixed; bottom:80px; right:30px; font-size:10px; color:#444; pointer-events:none; text-align:right;"></div>
+  </div>
   </div>
   <div id="calib-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.9); z-index:100; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding: 40px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;">
     <h1 id="calib-overlay-title" style="font-size:48px; margin-bottom:30px; color:#ff9d00;">Calibration</h1>
@@ -99,7 +101,7 @@ const css = document.createElement('style');
 css.textContent = `
   html, body, #app { margin:0; padding:0; height:100%; overflow:hidden; background:#111; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; color:#eee; }
   canvas { display:block; }
-  #hud { position:fixed; inset:0; pointer-events:none; z-index:5; }
+  #hud { position:fixed; inset:0; pointer-events:none; z-index:250; }
   #hud .row { position:absolute; left:0; right:0; display:flex; justify-content:space-between; padding:20px 30px; gap:15px; }
   #hud .row.top { top:0; }
   #hud .row.bottom { bottom:0; }
@@ -1864,6 +1866,10 @@ function applyGyro(data) {
   }
   p.aim.nx = data.nx; p.aim.ny = data.ny;
   pktCount++;
+  
+  if (pktCount % 300 === 0) {
+    console.log(`[Gyro] Recv from P${p.slot}. Aim: ${p.aim.nx.toFixed(2)}, ${p.aim.ny.toFixed(2)}`);
+  }
 }
 
 // Server relay path (when WebRTC isn't established yet or has dropped).
@@ -2029,6 +2035,7 @@ function playMechSound(freq, dur) {
 let recoilPhase = 0;
 
 function fireShot(playerId) {
+  console.log(`[Fire] Player ${playerId} attempt. State: ${gameState}`);
   if (gameState !== 'PLAYING') return;
 
   // Resolve which player is firing. Fallback to slot 1 if unknown.
@@ -2287,6 +2294,11 @@ function animate() {
   }
 
   camera.lookAt(0, 5, -50);
+
+  if (Math.floor(t * 2) % 2 === 0) {
+    const debug = $('debug-info');
+    if (debug) debug.textContent = `STATE: ${gameState} | MODE: ${gameMode} | PLAYERS: ${players.size} | PKTS: ${pktCount}`;
+  }
 
   renderer.render(scene, camera);
   requestAnimationFrame(animate);

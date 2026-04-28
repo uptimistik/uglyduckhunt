@@ -682,6 +682,13 @@ async function onConnect() {
   });
 
   state.socket.on('recalibrate', calibrateFromRemote);
+  state.socket.on('calibration_complete', () => {
+    state.calib.done = true;
+    calibCard.classList.add('hidden');
+    blankCard.classList.add('hidden');
+    playCard.classList.remove('hidden');
+    playStatus.textContent = 'Calibration complete. Ready to shoot.';
+  });
 
   // ---------------- WebRTC peer connection (controller = answerer) ----------------
   // The screen creates the data channels and sends the offer once it sees

@@ -150,7 +150,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('calib_done', (roomCode) => {
-    socket.to(roomCode).emit('calib_done');
+    socket.to(roomCode).emit('calib_done', { playerId: socket.id });
   });
 
   // Relay calibration_complete from screen back to controller
