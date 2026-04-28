@@ -582,6 +582,11 @@ function updateTimerUI() {
 function endGame() {
   gameState = 'GAMEOVER';
   if (timerInterval) clearInterval(timerInterval);
+  
+  // Clear any remaining ducks
+  ducks.forEach(d => scene.remove(d));
+  ducks.length = 0;
+
   $('game-over-overlay').style.display = 'flex';
   
   const results = $('go-results');
