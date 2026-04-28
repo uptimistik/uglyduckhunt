@@ -1,0 +1,69 @@
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; padding: 0; height: 100%; background: #0b0d12; color: #e9ecf1; font-family: -apple-system, system-ui, sans-serif; overscroll-behavior: none; user-select: none; }
+input, button { font-family: inherit; }
+#app { min-height: 100%; }
+
+.ctrl-root { padding: 14px; padding-top: max(14px, env(safe-area-inset-top)); display: flex; flex-direction: column; gap: 12px; min-height: 100vh; }
+
+.bar { display:flex; align-items:center; justify-content:space-between; }
+.logo { font-weight: 800; font-size: 18px; }
+.badge { padding: 6px 10px; border-radius: 999px; font-size: 12px; background:#2a3142; color:#b6bdcb; }
+.badge.ok  { background:#13351f; color:#7ee2a0; }
+.badge.bad { background:#3a1820; color:#f48a8a; }
+
+.card { background: #151922; border: 1px solid #222834; border-radius: 14px; padding: 16px; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+.card.hidden { display: none; }
+.card label { display:block; font-size: 11px; color:#98a2b3; margin: 10px 0 6px; text-transform: uppercase; letter-spacing: 1px; }
+.card input[type=text] {
+  width: 100%; font-size: 18px; padding: 12px 14px;
+  background:#0e121a; color:#e9ecf1; border:1px solid #2a3142; border-radius: 10px; outline: none;
+}
+.card input[type=text]:focus { border-color:#4c8bf5; }
+
+button { width: 100%; padding: 14px; border-radius: 12px; border: none; font-size: 16px; font-weight: 700; cursor: pointer; transition: transform .05s, filter .15s; }
+button:active { transform: scale(.98); filter: brightness(.9); }
+button.primary  { background:#4c8bf5; color:#fff; margin-top: 10px; }
+button.secondary{ background:#2a3142; color:#e9ecf1; margin-top: 8px; }
+button.fire     { background:#e23b4b; color:#fff; padding: 18px; font-size: 18px; }
+
+.row { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.calib-target {
+  position: relative; height: 200px; margin-top: 12px; margin-bottom: 4px;
+  background:
+    radial-gradient(circle at center, rgba(76,139,245,.18) 0%, rgba(76,139,245,0) 60%),
+    repeating-linear-gradient(0deg,#0e121a 0 24px, #11161f 24px 25px),
+    repeating-linear-gradient(90deg,#0e121a 0 24px, #11161f 24px 25px);
+  border: 1px dashed #2a3142; border-radius: 14px; overflow: hidden;
+}
+.calib-target::before, .calib-target::after {
+  content: ''; position: absolute; background: rgba(76,139,245,.5);
+}
+.calib-target::before { left: 50%; top: 0; bottom: 0; width: 1px; }
+.calib-target::after  { top: 50%; left: 0; right: 0; height: 1px; }
+.calib-arrow {
+  position:absolute; left:50%; top:50%; width:18px; height:18px;
+  margin-left:-9px; margin-top:-9px; border-radius:50%;
+  background:#4c8bf5; box-shadow:0 0 0 5px rgba(76,139,245,.25);
+  transition: left .04s linear, top .04s linear;
+  font-size: 0;
+}
+.play-status { background:#0e121a; border:1px solid #2a3142; border-radius:10px; padding:12px; margin-bottom:8px; color:#b6bdcb; font-size:14px; }
+
+.aimpad {
+  position: relative; height: 220px; margin-top: 12px;
+  background: radial-gradient(circle at center, #19223a 0%, #0e121a 70%);
+  border: 1px dashed #2a3142; border-radius: 14px; overflow: hidden;
+  touch-action: none;
+}
+.aim-dot { position:absolute; width: 22px; height: 22px; margin-left:-11px; margin-top:-11px; border-radius: 50%; background:#4c8bf5; box-shadow: 0 0 0 4px rgba(76,139,245,.25); transition: left .04s linear, top .04s linear; }
+.aim-label { position:absolute; bottom: 8px; left: 0; right: 0; text-align:center; font-size: 12px; color:#98a2b3; }
+
+.diag { margin-top: 10px; background:#0e121a; border:1px solid #1c2333; border-radius: 10px; padding: 8px 12px; }
+.diag summary { color:#98a2b3; font-size: 13px; cursor:pointer; }
+.diag .grid { margin-top: 8px; display:grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; font-variant-numeric: tabular-nums; }
+.diag .grid > div { display:flex; justify-content:space-between; font-size:12px; color:#b6bdcb; }
+.diag .grid b { color:#fff; font-weight:600; }
+
+.status { margin-top: 10px; font-size: 13px; color:#98a2b3; min-height: 18px; }
+.hint   { margin-top: 8px; font-size: 12px; color:#98a2b3; }

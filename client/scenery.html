@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hunting Scenery</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #111; }
+    canvas { display: block; }
+    #loading { 
+      position: fixed; inset: 0; 
+      display: flex; align-items: center; justify-content: center;
+      background: #0a0a0a; color: #888; font-family: sans-serif;
+      z-index: 10; transition: opacity 0.5s;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">Loading scenery...</div>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { Water } from 'three/addons/objects/Water.js';
+    import { Sky } from 'three/addons/objects/Sky.js';
+
+    // Scene setup
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x1a1a2e, 0.008);
+    
+    const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 20000);
+    camera.position.set(-8, 3, 25);
+    camera.lookAt(0, 2, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.6;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.body.appendChild(renderer.domElement);
+
+    // Sunset lighting
+    const sun = new THREE.Vector3();
+    const elevation = 3.5;
+    const azimuth = 110;
+    const phi = THREE.MathUtils.degToRad(90 - elevation);
+    const theta = THREE.MathUtils.degToRad(azimuth);
+    sun.setFromSphericalCoords(1, phi, theta);
+
+    // Ambient light
+    const ambientLight = new THREE.AmbientLight(0x2a3a4a, 0.4);
+    scene.add(ambientLight);
+
+    // Directional light (sun)
+    const sunLight = new THREE.DirectionalLight(0xffaa66, 1.5);
+    sunLight.position.copy(sun).multiplyScalar(100);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.width = 2048;
+    sunLight.shadow.mapSize.height = 2048;
+    sunLight.shadow.camera.near = 0.5;
+    sunLight.shadow.camera.far = 500;
+    sunLight.shadow.camera.left = -50;
+    sunLight.shadow.camera.right = 50;
+    sunLight.shadow.camera.top = 50;
+    sunLight.shadow.camera.bottom = -50;
+    scene.add(sunLight);
+
+    // Fill light from front
+    const fillLight = new THREE.DirectionalLight(0x88aabb, 0.3);
+    fillLight.position.set(0, 10, 50);
+    scene.add(fillLight);
+
+    // ============ SKY ============
+    const sky = new Sky();
+    sky.scale.setScalar(10000);
+    scene.add(sky);
+
+    const skyUniforms = sky.material.uniforms;
+    skyUniforms['turbidity'].value = 8;
+    skyUniforms['rayleigh'].value = 2.5;
+    skyUniforms['mieCoefficient'].value = 0.008;
+    skyUniforms['mieDirectionalG'].value = 0.75;
+    skyUniforms['sunPosition'].value.copy(sun);
+
+    // ============ WATER ============
+    const waterGeometry = new THREE.PlaneGeometry(10000, 10000);
+    const water = new Water(waterGeometry, {
+      textureWidth: 512,
+      textureHeight: 512,
+      waterNormals: new THREE.TextureLoader().load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/water/waternormals.jpg', function(texture) {
+        texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+      }),
+      sunDirection: new THREE.Vector3(),
+      sunColor: 0xffaa66,
+      waterColor: 0x0a1a2a,
+      distortionScale: 3.5,
+      fog: true
+    });
+    water.rotation.x = -Math.PI / 2;
+    water.position.y = -0.5;
+    water.material.uniforms['sunDirection'].value.copy(sun).normalize();
+    scene.add(water);
+
+    // ============ TERRAIN/MARSH GROUND ============
+    // Create uneven marsh ground
+    const groundGeo = new THREE.PlaneGeometry(200, 100, 64, 32);
+    const posAttribute = groundGeo.attributes.position;
+    
+    for (let i = 0; i < posAttribute.count; i++) {
+      const x = posAttribute.getX(i);
+      const y = posAttribute.getY(i);
+      // Create gentle rolling terrain with some lower patches for water
+      const height = Math.sin(x * 0.05) * 0.3 + Math.cos(y * 0.08) * 0.2 + 
+                     Math.sin(x * 0.15 + y * 0.1) * 0.15 - 0.5;
+      posAttribute.setZ(i, height);
+    }
+    
+    groundGeo.computeVertexNormals();
+    
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: 0x3a3a2a,
+      roughness: 0.9,
+      metalness: 0.1
+    });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -0.8;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+
+    // ============ DOG SILHOUETTE ============
+    function createDog() {
+      const dogGroup = new THREE.Group();
+      
+      const darkMat = new THREE.MeshBasicMaterial({ color: 0x0a0a0a });
+      
+      // Body
+      const bodyGeo = new THREE.BoxGeometry(0.5, 0.55, 1.0);
+      const body = new THREE.Mesh(bodyGeo, darkMat);
+      body.position.y = 0.5;
+      dogGroup.add(body);
+      
+      // Chest/shoulders
+      const chestGeo = new THREE.BoxGeometry(0.55, 0.6, 0.5);
+      const chest = new THREE.Mesh(chestGeo, darkMat);
+      chest.position.set(0, 0.55, 0.35);
+      dogGroup.add(chest);
+      
+      // Head
+      const headGeo = new THREE.BoxGeometry(0.35, 0.4, 0.5);
+      const head = new THREE.Mesh(headGeo, darkMat);
+      head.position.set(0, 0.95, 0.65);
+      dogGroup.add(head);
+      
+      // Snout
+      const snoutGeo = new THREE.BoxGeometry(0.2, 0.18, 0.3);
+      const snout = new THREE.Mesh(snoutGeo, darkMat);
+      snout.position.set(0, 0.88, 0.95);
+      dogGroup.add(snout);
+      
+      // Ears
+      const earGeo = new THREE.BoxGeometry(0.08, 0.25, 0.15);
+      const leftEar = new THREE.Mesh(earGeo, darkMat);
+      leftEar.position.set(-0.22, 1.0, 0.6);
+      leftEar.rotation.z = 0.3;
+      dogGroup.add(leftEar);
+      
+      const rightEar = new THREE.Mesh(earGeo, darkMat);
+      rightEar.position.set(0.22, 1.0, 0.6);
+      rightEar.rotation.z = -0.3;
+      dogGroup.add(rightEar);
+      
+      // Tail
+      const tailGeo = new THREE.CylinderGeometry(0.06, 0.04, 0.5, 6);
+      const tail = new THREE.Mesh(tailGeo, darkMat);
+      tail.position.set(0, 0.7, -0.55);
+      tail.rotation.x = -0.8;
+      dogGroup.add(tail);
+      
+      // Legs
+      const legGeo = new THREE.CylinderGeometry(0.1, 0.08, 0.5, 6);
+      
+      const frontLeft = new THREE.Mesh(legGeo, darkMat);
+      frontLeft.position.set(-0.2, 0.25, 0.4);
+      dogGroup.add(frontLeft);
+      
+      const frontRight = new THREE.Mesh(legGeo, darkMat);
+      frontRight.position.set(0.2, 0.25, 0.4);
+      dogGroup.add(frontRight);
+      
+      const backLeft = new THREE.Mesh(legGeo, darkMat);
+      backLeft.position.set(-0.2, 0.25, -0.35);
+      dogGroup.add(backLeft);
+      
+      const backRight = new THREE.Mesh(legGeo, darkMat);
+      backRight.position.set(0.2, 0.25, -0.35);
+      dogGroup.add(backRight);
+      
+      return dogGroup;
+    }
+
+    const dog = createDog();
+    dog.position.set(-2.5, -0.4, 1.5);
+    dog.rotation.y = 0.4;
+    dog.castShadow = true;
+    scene.add(dog);
+
+    // ============ REEDS/GRASS USING CUSTOM SHADER ============
+    function buildReeds() {
+      const BLADE_W = 0.08;
+      const BLADE_H = 1.8;
+      const JOINTS = 4;
+      const INSTANCES = 8000;
+      
+      // Create gradient texture for reeds
+      const diffCanvas = document.createElement('canvas');
+      diffCanvas.width = 32; diffCanvas.height = 128;
+      const dctx = diffCanvas.getContext('2d');
+      const grad = dctx.createLinearGradient(0, 128, 0, 0);
+      grad.addColorStop(0, '#2a2010');
+      grad.addColorStop(0.5, '#3a3020');
+      grad.addColorStop(1, '#1a1508');
+      dctx.fillStyle = grad; dctx.fillRect(0, 0, 32, 128);
+      
+      // Add noise
+      const imgData = dctx.getImageData(0, 0, 32, 128);
+      for (let i = 0; i < imgData.data.length; i += 4) {
+        const n = (Math.random() - 0.5) * 30;
+        imgData.data[i] = Math.max(0, Math.min(255, imgData.data[i] + n));
+        imgData.data[i+1] = Math.max(0, Math.min(255, imgData.data[i+1] + n));
+        imgData.data[i+2] = Math.max(0, Math.min(255, imgData.data[i+2] + n));
+      }
+      dctx.putImageData(imgData, 0, 0);
+      const diffuseTex = new THREE.CanvasTexture(diffCanvas);
+
+      // Alpha map
+      const alphaCanvas = document.createElement('canvas');
+      alphaCanvas.width = 32; alphaCanvas.height = 128;
+      const actx = alphaCanvas.getContext('2d');
+      actx.fillStyle = '#fff'; actx.fillRect(0, 0, 32, 128);
+      actx.fillStyle = '#000';
+      actx.beginPath(); actx.moveTo(0, 128); actx.lineTo(32, 128);
+      actx.lineTo(16, 0); actx.closePath(); actx.fill();
+      const alphaTex = new THREE.CanvasTexture(alphaCanvas);
+
+      const baseGeo = new THREE.PlaneGeometry(BLADE_W, BLADE_H, 1, JOINTS);
+      baseGeo.translate(0, BLADE_H / 2, 0);
+
+      const instGeo = new THREE.InstancedBufferGeometry();
+      instGeo.instanceCount = INSTANCES;
+      instGeo.setAttribute('position', baseGeo.attributes.position);
+      instGeo.setAttribute('uv', baseGeo.attributes.uv);
+
+      const offsets = new Float32Array(INSTANCES * 3);
+      const orientations = new Float32Array(INSTANCES * 4);
+      const stretches = new Float32Array(INSTANCES);
+      const halfRootAngleSin = new Float32Array(INSTANCES);
+      const halfRootAngleCos = new Float32Array(INSTANCES);
+
+      const q0 = new THREE.Quaternion();
+      const q1 = new THREE.Quaternion();
+      const axisY = new THREE.Vector3(0, 1, 0);
+      const axisX = new THREE.Vector3(1, 0, 0);
+      const axisZ = new THREE.Vector3(0, 0, 1);
+
+      for (let i = 0; i < INSTANCES; i++) {
+        // Scatter reeds around the scene
+        const angle = Math.random() * Math.PI * 2;
+        const radius = 3 + Math.random() * 25;
+        const x = Math.cos(angle) * radius + (Math.random() - 0.5) * 10;
+        const z = Math.sin(angle) * radius * 0.6 + (Math.random() - 0.5) * 8;
+        
+        // Keep clear of hunter and dog
+        if (Math.abs(x - 2) < 3 && Math.abs(z) < 3) continue;
+        if (Math.abs(x + 2.5) < 2.5 && Math.abs(z - 1.5) < 2) continue;
+        
+        offsets[i * 3 + 0] = x;
+        offsets[i * 3 + 1] = -0.5 + Math.random() * 0.3;
+        offsets[i * 3 + 2] = z;
+
+        const yaw = Math.PI - Math.random() * (2 * Math.PI);
+        halfRootAngleSin[i] = Math.sin(0.5 * yaw);
+        halfRootAngleCos[i] = Math.cos(0.5 * yaw);
+
+        let angleTilt = Math.PI / 2;
+        q0.setFromAxisAngle(axisX, angleTilt);
+        const varAngle = (Math.random() - 0.5) * 0.4;
+        q1.setFromAxisAngle(axisZ, varAngle);
+        q0.multiply(q1);
+        
+        q1.setFromAxisAngle(axisY, yaw);
+        q0.multiply(q1);
+
+        orientations[i * 4 + 0] = q0.x;
+        orientations[i * 4 + 1] = q0.y;
+        orientations[i * 4 + 2] = q0.z;
+        orientations[i * 4 + 3] = q0.w;
+
+        stretches[i] = Math.random() * 0.6 + 0.4;
+      }
+
+      instGeo.setAttribute('offset', new THREE.InstancedBufferAttribute(offsets, 3));
+      instGeo.setAttribute('orientation', new THREE.InstancedBufferAttribute(orientations, 4));
+      instGeo.setAttribute('stretch', new THREE.InstancedBufferAttribute(stretches, 1));
+      instGeo.setAttribute('halfRootAngleSin', new THREE.InstancedBufferAttribute(halfRootAngleSin, 1));
+      instGeo.setAttribute('halfRootAngleCos', new THREE.InstancedBufferAttribute(halfRootAngleCos, 1));
+
+      const reedMat = new THREE.ShaderMaterial({
+        uniforms: {
+          map: { value: diffuseTex },
+          alphaMap: { value: alphaTex },
+          time: { value: 0 }
+        },
+        vertexShader: `
+          precision mediump float;
+          attribute vec3 offset;
+          attribute vec4 orientation;
+          attribute float halfRootAngleSin;
+          attribute float halfRootAngleCos;
+          attribute float stretch;
+          uniform float time;
+          varying vec2 vUv;
+          varying float frc;
+
+          vec3 rotateVectorByQuaternion(vec3 v, vec4 q){
+            return 2.0 * cross(q.xyz, v * q.w + cross(q.xyz, v)) + v;
+          }
+          
+          vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+          vec2 mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+          vec3 permute(vec3 x) { return mod289(((x*34.0)+1.0)*x); }
+          float snoise(vec2 v){
+            const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
+            vec2 i  = floor(v + dot(v, C.yy));
+            vec2 x0 = v - i + dot(i, C.xx);
+            vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+            vec4 x12 = x0.xyxy + C.xxzz;
+            x12.xy -= i1;
+            i = mod289(i);
+            vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
+            vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+            m = m*m ; m = m*m ;
+            vec3 x = 2.0 * fract(p * C.www) - 1.0;
+            vec3 h = abs(x) - 0.5;
+            vec3 ox = floor(x + 0.5);
+            vec3 a0 = x - ox;
+            m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+            vec3 g;
+            g.x  = a0.x  * x0.x  + h.x  * x0.y;
+            g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+            return 130.0 * dot(m, g);
+          }
+
+          vec4 slerp(vec4 v0, vec4 v1, float t) {
+            normalize(v0); normalize(v1);
+            float dot_ = dot(v0, v1);
+            if (dot_ < 0.0) { v1 = -v1; dot_ = -dot_; }
+            if (dot_ > 0.9995) { return normalize(mix(v0, v1, t)); }
+            float theta_0 = acos(dot_);
+            float theta = theta_0 * t;
+            float sin_theta = sin(theta);
+            float sin_theta_0 = sin(theta_0);
+            float s0 = cos(theta) - dot_ * sin_theta / sin_theta_0;
+            float s1 = sin_theta / sin_theta_0;
+            return (s0 * v0) + (s1 * v1);
+          }
+
+          void main(){
+            frc = position.y / ${BLADE_H.toFixed(2)};
+            float noise = 1.0 - (snoise(vec2((time - offset.x/50.0), (time - offset.z/50.0))));
+            vec4 direction = vec4(0.0, halfRootAngleSin, 0.0, halfRootAngleCos);
+            direction = slerp(direction, orientation, frc);
+            vec3 vPosition = vec3(position.x, position.y + position.y * stretch, position.z);
+            vPosition = rotateVectorByQuaternion(vPosition, direction);
+            float halfAngle = noise * 0.08;
+            vPosition = rotateVectorByQuaternion(vPosition, normalize(vec4(sin(halfAngle), 0.0, -sin(halfAngle), cos(halfAngle))));
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(offset + vPosition, 1.0);
+          }
+        `,
+        fragmentShader: `
+          precision mediump float;
+          uniform sampler2D map;
+          uniform sampler2D alphaMap;
+          varying vec2 vUv;
+          varying float frc;
+          void main() {
+            vec4 col = texture2D(map, vUv);
+            gl_FragColor = col;
+            if(texture2D(alphaMap, vUv).r < 0.15) discard;
+          }
+        `,
+        side: THREE.DoubleSide,
+        transparent: false,
+        alphaTest: 0.15,
+        depthWrite: true
+      });
+
+      const mesh = new THREE.Mesh(instGeo, reedMat);
+      mesh.frustumCulled = false;
+      scene.add(mesh);
+      return { mesh, material: reedMat };
+    }
+
+    const reeds = buildReeds();
+
+    // ============ DISTANT MOUNTAINS ============
+    function buildMountains() {
+      const segments = 128;
+      const positions = [];
+      const radius = 180;
+      const baseHeight = 25;
+      
+      for (let i = 0; i <= segments; i++) {
+        const t = i / segments;
+        const a = Math.PI + t * Math.PI;
+        const x = Math.sin(a) * radius;
+        const z = Math.cos(a) * radius;
+        
+        let h = baseHeight;
+        h += Math.sin(t * Math.PI * 6) * 8;
+        h += Math.sin(t * Math.PI * 14) * 4;
+        h += Math.sin(t * Math.PI * 28) * 2;
+        h += Math.max(0, Math.sin(t * Math.PI * 3)) * 12;
+        
+        positions.push(x, -2, z);
+        positions.push(x, -2 + h, z);
+      }
+      
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      
+      const indices = [];
+      for (let i = 0; i < segments; i++) {
+        const v1 = i * 2;
+        const v2 = i * 2 + 1;
+        const v3 = (i + 1) * 2;
+        const v4 = (i + 1) * 2 + 1;
+        indices.push(v1, v2, v3, v2, v4, v3);
+      }
+      geo.setIndex(indices);
+      geo.computeVertexNormals();
+      
+      const mat = new THREE.MeshBasicMaterial({ 
+        color: 0x1a1a2a,
+        side: THREE.DoubleSide
+      });
+      
+      const mountains = new THREE.Mesh(geo, mat);
+      scene.add(mountains);
+      return mountains;
+    }
+
+    buildMountains();
+
+    // ============ SCATTERED TALL GRASS ============
+    function buildTallGrass() {
+      const grassGroup = new THREE.Group();
+      const darkMat = new THREE.MeshBasicMaterial({ color: 0x151510 });
+      
+      for (let i = 0; i < 150; i++) {
+        const h = 0.8 + Math.random() * 1.2;
+        const geo = new THREE.CylinderGeometry(0.02, 0.04, h, 4);
+        geo.translate(0, h/2, 0);
+        
+        const blade = new THREE.Mesh(geo, darkMat);
+        const angle = Math.random() * Math.PI * 2;
+        const radius = 2 + Math.random() * 20;
+        blade.position.set(
+          Math.cos(angle) * radius,
+          -0.5,
+          Math.sin(angle) * radius * 0.5
+        );
+        blade.rotation.z = (Math.random() - 0.5) * 0.3;
+        blade.rotation.x = (Math.random() - 0.5) * 0.2;
+        grassGroup.add(blade);
+      }
+      
+      scene.add(grassGroup);
+      return grassGroup;
+    }
+
+    buildTallGrass();
+
+    // ============ ANIMATION LOOP ============
+    const clock = new THREE.Clock();
+
+    function animate() {
+      const dt = clock.getDelta();
+      const t = clock.getElapsedTime();
+
+      // Animate water
+      water.material.uniforms['time'].value += dt;
+      
+      // Animate reeds (wind)
+      reeds.material.uniforms.time.value = t / 4;
+
+
+      
+      // Subtle dog movement
+      dog.position.y = -0.4 + Math.sin(t * 0.3 + 1) * 0.008;
+      dog.rotation.y = 0.4 + Math.sin(t * 0.2) * 0.02;
+
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+
+    // Handle resize
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Hide loading
+    document.getElementById('loading').style.opacity = '0';
+    setTimeout(() => document.getElementById('loading').remove(), 500);
+
+    animate();
+  </script>
+</body>
+</html>
