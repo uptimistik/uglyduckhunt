@@ -8,13 +8,18 @@
     "build": "npm run patch-plugins && vite build",
     "preview": "vite preview",
     "patch-plugins": "node scripts/patch-plugins.js",
-    "postinstall": "node scripts/patch-plugins.js"
+    "postinstall": "node scripts/patch-plugins.js",
+    "android:sync": "npm run build && cap sync android",
+    "android:apk": "npm run android:sync && cd android && ./gradlew assembleDebug && cd .. && echo '\\nAPK: android/app/build/outputs/apk/debug/app-debug.apk'",
+    "android:install": "npm run android:apk && adb install -r android/app/build/outputs/apk/debug/app-debug.apk",
+    "android:run": "npm run android:install && adb shell am start -n com.duckhunt.controller/.MainActivity && adb logcat -c && adb logcat Capacitor:V Capacitor/Plugin:V '*:S'"
   },
   "devDependencies": {
     "@capacitor/cli": "^7.6.2",
     "vite": "^8.0.10"
   },
   "dependencies": {
+    "@capacitor/android": "^8.3.1",
     "@capacitor/core": "^8.3.1",
     "@capacitor/haptics": "^8.0.2",
     "@capacitor/ios": "^8.3.1",
