@@ -69,7 +69,7 @@ document.querySelector('#app').innerHTML = `
         <!-- Per-player scores injected at runtime -->
       </div>
     </div>
-    <div id="crosshair"></div>
+    <div id="player-crosshairs"></div>
     <div id="kill-banner"></div>
     <div id="debug-info" style="position:fixed; bottom:80px; right:30px; font-size:10px; color:#444; pointer-events:none; text-align:right;"></div>
   </div>
@@ -150,6 +150,13 @@ css.textContent = `
   .menu-btn:hover { background:rgba(255,157,0,0.2); border-color:#ff9d00; transform:scale(1.05); }
   .menu-btn small { font-size:11px; font-weight:400; color:#aaa; display:block; margin-top:5px; }
 
+  /* Crosshairs */
+  .ch { position:fixed; width:40px; height:40px; border:2px solid; border-radius:50%; pointer-events:none; transform:translate(-50%, -50%); display:flex; align-items:center; justify-content:center; z-index:260; transition: transform 0.05s linear; }
+  .ch::after { content:''; width:4px; height:4px; background:#fff; border-radius:50%; }
+  .ch.p1 { border-color:#ff5252; box-shadow:0 0 15px rgba(255,82,82,0.5); }
+  .ch.p2 { border-color:#42a5f5; box-shadow:0 0 15px rgba(66,165,245,0.5); }
+  .ch.fire { transform:translate(-50%, -50%) scale(1.5); opacity:0.5; }
+
   /* Kill banner */
   #kill-banner { position:fixed; top:90px; left:50%; transform:translateX(-50%) translateY(-40px); padding:10px 24px; border-radius:24px; font-weight:800; font-size:14px; letter-spacing:1px; opacity:0; transition:0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); pointer-events:none; z-index:50; }
   #kill-banner.show { transform:translateX(-50%) translateY(0); opacity:1; }
@@ -210,33 +217,22 @@ const PLAYER_COLORS = {
 
 const players = new Map(); // playerId -> Player
 
-function buildLaserSet(colors) {
-  const dot = new THREE.Mesh(
-    new THREE.SphereGeometry(0.2, 16, 16),
-    new THREE.MeshBasicMaterial({ color: colors.laser, depthTest: false })
-  );
-  dot.renderOrder = 999; scene.add(dot);
-
-  const halo = new THREE.Mesh(
-    new THREE.SphereGeometry(0.65, 16, 16),
-    new THREE.MeshBasicMaterial({ color: colors.halo, transparent: true, opacity: 0.7, depthWrite: false, depthTest: false })
-  );
-  halo.renderOrder = 998; scene.add(halo);
-
-  const beamGeo = new THREE.CylinderGeometry(0.05, 0.05, 1, 8, 1, true);
-  beamGeo.translate(0, 0.5, 0);
-  const beam = new THREE.Mesh(beamGeo, new THREE.MeshBasicMaterial({ color: colors.beam, transparent: true, opacity: 0.18, depthWrite: false }));
-  beam.renderOrder = 997; scene.add(beam);
-
-  return { dot, halo, beam };
-}
 
 function makePlayer(id, slot) {
   const colors = PLAYER_COLORS[slot] || PLAYER_COLORS[1];
-  const sights = buildLaserSet(colors);
+  
+  // Create DOM crosshair
+  const ch = document.createElement('div');
+  ch.className = `ch p${slot}`;
+  ch.id = `ch-${id}`;
+  $('player-crosshairs').appendChild(ch);
+
+  // Initial aim: P1 left (-0.5), P2 right (+0.5)
+  const initX = slot === 1 ? -0.5 : 0.5;
+
   return {
-    id, slot, colors, sights,
-    aim: { nx: 0, ny: 0, sx: 0, sy: 0 },
+    id, slot, colors, ch,
+    aim: { nx: initX, ny: 0, sx: initX, sy: 0 },
     lastSeq: -1,
     score: 0, shots: 0, hits: 0,
     pc: null, gyroDC: null, eventDC: null, rtcReady: false,
@@ -244,9 +240,7 @@ function makePlayer(id, slot) {
 }
 
 function destroyPlayer(p) {
-  scene.remove(p.sights.dot);
-  scene.remove(p.sights.halo);
-  scene.remove(p.sights.beam);
+  p.ch.remove();
   try { p.gyroDC?.close(); } catch(e) {}
   try { p.eventDC?.close(); } catch(e) {}
   try { p.pc?.close(); } catch(e) {}
@@ -1887,31 +1881,17 @@ socket.on('trigger', (info) => {
 });
 
 function updateLaser() {
-  // Update each player's laser sight. Smooth via lerp toward latest aim.
+  // Update each player's crosshair. Smooth via lerp toward latest aim.
   for (const p of players.values()) {
-    p.aim.sx = THREE.MathUtils.lerp(p.aim.sx, p.aim.nx, 0.75);
-    p.aim.sy = THREE.MathUtils.lerp(p.aim.sy, p.aim.ny, 0.75);
+    p.aim.sx = THREE.MathUtils.lerp(p.aim.sx, p.aim.nx, 0.4); // Slower lerp for smoothness
+    p.aim.sy = THREE.MathUtils.lerp(p.aim.sy, p.aim.ny, 0.4);
 
-    ndc.set(THREE.MathUtils.clamp(p.aim.sx, -1, 1), THREE.MathUtils.clamp(p.aim.sy, -1, 1));
-    raycaster.setFromCamera(ndc, camera);
+    // Map NDC (-1..1) to screen pixels
+    const px = (0.5 + p.aim.sx * 0.5) * window.innerWidth;
+    const py = (0.5 - p.aim.sy * 0.5) * window.innerHeight;
 
-    const duckMeshes = [];
-    ducks.forEach(d => d.traverse(o => { if (o.isMesh) duckMeshes.push(o); }));
-    const hits = raycaster.intersectObjects([terrain, water, ...duckMeshes], false);
-    let pt = raycaster.ray.origin.clone().add(raycaster.ray.direction.clone().multiplyScalar(400));
-    if (hits.length > 0) pt = hits[0].point;
-
-    p.sights.dot.position.copy(pt);
-    p.sights.halo.position.copy(pt);
-
-    // Each player's beam emits from a slightly different barrel offset so
-    // they don't perfectly overlap (P1 right of camera, P2 left).
-    const xOff = p.slot === 2 ? -1 : 1;
-    const barrel = camera.localToWorld(new THREE.Vector3(xOff, -1, -2));
-    p.sights.beam.position.copy(barrel);
-    const dir = pt.clone().sub(barrel);
-    p.sights.beam.scale.set(1, dir.length(), 1);
-    p.sights.beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+    p.ch.style.left = `${px}px`;
+    p.ch.style.top = `${py}px`;
   }
 }
 
@@ -2056,6 +2036,10 @@ function fireShot(playerId) {
   playShotgunSound();
   recoilPhase = 1.0;
   triggerMuzzleFlash();
+
+  // Crosshair punch effect
+  p.ch.classList.add('fire');
+  setTimeout(() => p.ch.classList.remove('fire'), 150);
 
   // Screen flash overlay
   const flash = document.createElement('div');
