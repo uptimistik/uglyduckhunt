@@ -71,8 +71,7 @@ document.querySelector('#app').innerHTML = `
     </header>
 
     <section class="card" id="setupCard">
-      <label>Server IP</label>
-      <input id="ipInput" type="text" value="cryptoduckhunt.replit.app" />
+      <div class="logo" style="font-size: 14px; margin-bottom: 20px; color: #ff9d00;">Connecting to Production Cloud...</div>
       <label>Room Code</label>
       <input id="roomInput" type="text" placeholder="ABCD" maxlength="6" autocapitalize="characters" />
       <button id="connectBtn" class="primary">Connect</button>
@@ -521,10 +520,9 @@ function flash() {
 
 // ---------------- Connection ----------------
 async function onConnect() {
-  state.serverIP = $('ipInput').value.trim();
   state.roomCode = $('roomInput').value.trim().toUpperCase();
-  if (!state.serverIP || !state.roomCode) {
-    setupStatus.textContent = 'IP and Room Code required.';
+  if (!state.roomCode) {
+    setupStatus.textContent = 'Room Code required.';
     return;
   }
 
