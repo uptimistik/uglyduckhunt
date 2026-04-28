@@ -347,10 +347,13 @@ function setupRTCFor(playerId) {
   p.gyroDC.onopen = () => setRtcStatusForPlayer(p, true);
   p.gyroDC.onclose = () => setRtcStatusForPlayer(p, false);
   p.gyroDC.onmessage = (e) => {
-    // Stamp the playerId before applying so stale-rejection works per-player.
-    const data = JSON.parse(e.data);
-    data.playerId = playerId;
-    applyGyro(data);
+    // Binary protocol: [nx*10000, ny*10000, seq]
+    const buf = new Int16Array(e.data);
+    if (buf.length < 2) return;
+    const nx = buf[0] / 10000;
+    const ny = buf[1] / 10000;
+    p.aim.nx = nx; p.aim.ny = ny;
+    pktCount++;
   };
 
   p.eventDC.onmessage = (e) => {
@@ -1850,25 +1853,18 @@ function isNewerSeq(incoming, previous) {
   return diff !== 0 && diff < SEQ_MOD / 2;
 }
 
-function applyGyro(data) {
-  if (!Number.isFinite(data?.nx) || !Number.isFinite(data?.ny)) return;
-  // Resolve player. Prefer explicit playerId; fall back to single-player.
-  const id = data.playerId || (players.size === 1 ? Array.from(players.keys())[0] : null);
-  if (!id) return;
-  const p = players.get(id);
-  // If the player isn't registered yet (controller_connected hasn't fired),
-  // drop the packet — the next one will arrive fast enough on a 60 Hz feed.
-  if (!p) return;
-  if (Number.isFinite(data.seq)) {
-    if (p.lastSeq >= 0 && !isNewerSeq(data.seq, p.lastSeq)) return; // stale, drop
-    p.lastSeq = data.seq;
-  }
-  p.aim.nx = data.nx; p.aim.ny = data.ny;
-  pktCount++;
-}
 
 // Server relay path (when WebRTC isn't established yet or has dropped).
-socket.on('gyro_data', applyGyro);
+socket.on('g', (data) => {
+  if (!data || !data.f || !data.b) return;
+  const p = players.get(data.f);
+  if (!p) return;
+  const buf = new Int16Array(data.b);
+  if (buf.length < 2) return;
+  p.aim.nx = buf[0] / 10000;
+  p.aim.ny = buf[1] / 10000;
+  pktCount++;
+});
 
 // Trigger via server relay. New format includes playerId; old format is just `()`.
 socket.on('trigger', (info) => {

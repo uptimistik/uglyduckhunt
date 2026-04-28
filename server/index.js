@@ -80,6 +80,17 @@ io.on('connection', (socket) => {
   // per-packet ack — over WAN it doubles round-trips and creates lag.
   // Use `volatile` so if the screen is overloaded, packets are dropped
   // instead of queued (queuing causes rubber-banding).
+  // RELAY: High-frequency binary gyro data.
+  // We use a dedicated short name 'g' and volatile emit to minimize overhead.
+  socket.on('g', (buf) => {
+    const rc = socket.data?.roomCode;
+    if (!rc) return;
+    const sid = roomScreens.get(rc);
+    if (!sid) return;
+    // Relay the raw buffer. The receiver uses the 'from' property to identify the player.
+    io.to(sid).volatile.emit('g', { f: socket.id, b: buf });
+  });
+
   socket.on('gyro_data', (data) => {
     if (!data || !data.roomCode) return;
     const { roomCode, ...payload } = data;
