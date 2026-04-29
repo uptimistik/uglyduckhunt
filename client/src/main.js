@@ -712,7 +712,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'hi
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.4; // Boosted exposure for brighter scene
@@ -1670,8 +1670,8 @@ class Dog {
     
     // Update HUD
     const row = $(`dog-stat-${this.id}`);
-    row.querySelector('.d-happy').textContent = `${Math.floor(this.happiness)}%`;
-    row.querySelector('.d-speed').textContent = (this.baseSpeed + this.sprintBurst).toFixed(1);
+    const happyEl = row.querySelector('.d-happy');
+    if (happyEl) happyEl.textContent = `${Math.floor(this.happiness)}%`;
   }
 }
 
