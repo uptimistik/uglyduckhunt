@@ -1915,7 +1915,13 @@ socket.on('g', (data) => {
 
 // Trigger via server relay. New format includes playerId; old format is just `()`.
 socket.on('trigger', (info) => {
-  const id = info?.playerId || (players.size === 1 ? Array.from(players.keys())[0] : null);
+  const id = info?.playerId || Array.from(players.keys())[0];
+  if (id) {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      initAmbient();
+    }
+  }
   fireShot(id);
 });
 
@@ -2024,6 +2030,111 @@ function playShotgunSound() {
   setTimeout(() => playMechSound(400, 0.05), 450);
   // "Chuck 2"
   setTimeout(() => playMechSound(800, 0.08), 650);
+}
+
+function playQuack() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  const filter = audioCtx.createBiquadFilter();
+
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(350, t);
+  osc.frequency.exponentialRampToValueAtTime(280, t + 0.15);
+
+  filter.type = 'bandpass';
+  filter.frequency.value = 800;
+  filter.Q.value = 5;
+
+  gain.gain.setValueAtTime(0, t);
+  gain.gain.linearRampToValueAtTime(0.15, t + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.01, t + 0.2);
+
+  osc.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  osc.start(t);
+  osc.stop(t + 0.2);
+}
+
+function playWings() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const noiseSize = audioCtx.sampleRate * 0.1;
+  const buffer = audioCtx.createBuffer(1, noiseSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < noiseSize; i++) data[i] = Math.random() * 2 - 1;
+
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buffer;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = 400;
+
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.04, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+
+  noise.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioCtx.destination);
+  noise.start(t);
+}
+
+let ambientNoise = null;
+function initAmbient() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const bufferSize = audioCtx.sampleRate * 4;
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  
+  // Pink noise approximation for water/wind
+  let b0, b1, b2, b3, b4, b5, b6;
+  b0 = b1 = b2 = b3 = b4 = b5 = b6 = 0.0;
+  for (let i = 0; i < bufferSize; i++) {
+    const white = Math.random() * 2 - 1;
+    b0 = 0.99886 * b0 + white * 0.0555179;
+    b1 = 0.99332 * b1 + white * 0.0750759;
+    b2 = 0.96900 * b2 + white * 0.1538520;
+    b3 = 0.86650 * b3 + white * 0.3104856;
+    b4 = 0.55000 * b4 + white * 0.5329522;
+    b5 = -0.7616 * b5 - white * 0.0168980;
+    data[i] = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362;
+    data[i] *= 0.11;
+    b6 = white * 0.115926;
+  }
+
+  ambientNoise = audioCtx.createBufferSource();
+  ambientNoise.buffer = buffer;
+  ambientNoise.loop = true;
+  
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = 800;
+
+  const lfo = audioCtx.createOscillator();
+  const lfoGain = audioCtx.createGain();
+  lfo.frequency.value = 0.15;
+  lfoGain.gain.value = 200;
+  lfo.connect(lfoGain);
+  lfoGain.connect(filter.frequency);
+  lfo.start();
+
+  const gain = audioCtx.createGain();
+  gain.gain.value = 0.15;
+
+  ambientNoise.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioCtx.destination);
+  ambientNoise.start(t);
+  
+  // Occasional random quacks
+  setInterval(() => {
+    if (gameState === 'PLAYING' && Math.random() > 0.7) playQuack();
+  }, 4000);
 }
 
 function playMechSound(freq, dur) {
@@ -2239,6 +2350,12 @@ function animate() {
     const flapBoost = (d.userData.phase === 'flush' || d.userData.phase === 'takeoff') ? 1.8 : (d.userData.phase === 'climb' ? 1.15 : 0.95);
     d.userData.flap += dt * (12 + d.userData.vel.length() * 0.28) * flapBoost;
     
+    // Wing flapping sound (rate limited)
+    if (t - lastWingT > 0.08 && Math.sin(d.userData.flap) > 0.8) {
+      playWings();
+      lastWingT = t;
+    }
+
     let f = Math.sin(d.userData.flap) * 0.9;
     if (d.userData.phase === 'swim') f = 0.1; // Tucked wings while swimming
     if (d.userData.phase === 'land') f = 0.3; // Fixed glide angle for landing
