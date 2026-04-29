@@ -679,7 +679,6 @@ function unlockBadge(id, icon, label) {
   notif.textContent = `Badge Earned: ${label}`;
   notif.classList.add('show');
   setTimeout(() => notif.classList.remove('show'), 4000);
-  playMechSound(1000, 0.2);
 }
 
 function checkAchievements() {
