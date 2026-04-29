@@ -1969,6 +1969,7 @@ function explodeDuck(duck) {
 // ----------------------------------------------------------------------------------------------------------------------------------------------------
 // Synthetic Audio for Shotgun
 let audioCtx;
+let lastWingT = 0;
 
 // Ensure audio context is unlocked by any user interaction
 document.addEventListener('click', () => {
