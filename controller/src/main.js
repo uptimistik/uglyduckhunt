@@ -171,11 +171,22 @@ async function requestSensorPermissions() {
 }
 
 function attachSensorListeners() {
-  // Prefer 'deviceorientation' for the OS-fused absolute attitude.
-  window.addEventListener('deviceorientation', onOrientation, true);
-  // Some platforms use deviceorientationabsolute. Listen to both.
-  window.addEventListener('deviceorientationabsolute', onOrientation, true);
-  window.addEventListener('devicemotion', () => { state.motionCount++; }, true);
+  state.orientationCount = 0;
+  state.motionCount = 0;
+
+  // Android prefers 'deviceorientationabsolute' for magnetometer-backed data.
+  // iOS uses 'deviceorientation' (magnetometer-backed) or requests permission.
+  
+  const handleAnyOrientation = (e) => {
+    state.orientationCount++;
+    onOrientation(e);
+  };
+
+  window.addEventListener('deviceorientation', handleAnyOrientation, true);
+  window.addEventListener('deviceorientationabsolute', handleAnyOrientation, true);
+  window.addEventListener('devicemotion', (e) => { 
+    state.motionCount++; 
+  }, true);
 
   // Debug: log sensor listener attachment
   console.log('[Sensors] Attached listeners for deviceorientation, deviceorientationabsolute, devicemotion');
@@ -221,6 +232,11 @@ function onOrientation(e) {
     return;
   }
   state.qNow = qCandidate;
+
+  // Diagnostic update
+  if (state.orientationCount % 30 === 0) {
+    setupStatus.textContent = `Sensors: Orient#${state.orientationCount}, Motion#${state.motionCount}`;
+  }
 
   emit();
 }
