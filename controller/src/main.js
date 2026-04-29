@@ -344,8 +344,14 @@ function emit() {
   let nx, ny;
   if (state.qBase) {
     const { yaw, pitch } = relativeYawPitch();
-    nx = mapToNormalized(yaw,   state.calib.yawLeft,   state.calib.yawRight); // -1 at left, +1 at right
-    ny = mapToNormalized(pitch, state.calib.pitchDown, state.calib.pitchUp);   // -1 at bottom, +1 at top
+    let rnx = mapToNormalized(yaw,   state.calib.yawLeft,   state.calib.yawRight); // -1 at left, +1 at right
+    let rny = mapToNormalized(pitch, state.calib.pitchDown, state.calib.pitchUp);   // -1 at bottom, +1 at top
+    
+    // Apply One-Euro filter for jitter reduction
+    nx = oneEuro(state, 'fx', 'dx', rnx, now / 1000);
+    ny = oneEuro(state, 'fy', 'dy', rny, now / 1000);
+    state.primed = true;
+    state.lastT = now / 1000;
   } else {
     nx = 0; ny = 0;
   }

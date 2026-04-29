@@ -1921,8 +1921,8 @@ socket.on('trigger', (info) => {
 function updateLaser() {
   // Update each player's crosshair. Smooth via lerp toward latest aim.
   for (const p of players.values()) {
-    p.aim.sx = THREE.MathUtils.lerp(p.aim.sx, p.aim.nx, 0.75);
-    p.aim.sy = THREE.MathUtils.lerp(p.aim.sy, p.aim.ny, 0.75);
+    p.aim.sx = THREE.MathUtils.lerp(p.aim.sx, p.aim.nx, 0.12);
+    p.aim.sy = THREE.MathUtils.lerp(p.aim.sy, p.aim.ny, 0.12);
 
     // Map NDC (-1..1) to screen pixels
     const px = (0.5 + p.aim.sx * 0.5) * window.innerWidth;
