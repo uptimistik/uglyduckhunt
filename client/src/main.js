@@ -116,6 +116,8 @@ css.textContent = `
   #dogs-container { display:flex; flex-direction:column; gap:6px; margin-bottom:6px; }
   .dog-stat-row { background:rgba(0,0,0,0.3); padding:6px 10px; border-radius:6px; border-left:4px solid transparent; font-size:12px; }
   .dog-stat-line { display:flex; justify-content:space-between; font-size:10px; color:#aaa; margin-top:2px; }
+  .dog-stamina-container { width:100%; height:4px; background:rgba(255,255,255,0.1); border-radius:2px; overflow:hidden; margin-top:6px; }
+  .dog-stamina-bar { height:100%; width:100%; background:#4caf50; transition:width 0.3s ease, background-color 0.3s ease; }
   .dog-stat-line b { color:#fff; }
   
   #achievements-panel { position:absolute; right:30px; top:130px; width:220px; text-align:right; max-height:400px; overflow-y:auto; }
@@ -1480,7 +1482,9 @@ class Dog {
     row.style.borderLeftColor = `#${color.toString(16).padStart(6, '0')}`;
     row.innerHTML = `
       <div class="dog-stat-line"><span>${name}</span><b class="d-happy">100%</b></div>
-      <div class="dog-stat-line"><span>FETCH SPEED</span><b class="d-speed">20</b></div>
+      <div class="dog-stamina-container">
+        <div class="dog-stamina-bar" id="dog-bar-${id}"></div>
+      </div>
     `;
     $('dogs-container').appendChild(row);
   }
@@ -1533,6 +1537,16 @@ class Dog {
 
       this.group.position.lerp(target, dt * (currentSpeed / 8));
       
+      // Update HUD
+      const bar = $(`dog-bar-${this.id}`);
+      if (bar) {
+        const pct = Math.round(this.stamina * 100);
+        bar.style.width = `${pct}%`;
+        // Color shifts from green to red as stamina drops
+        const hue = this.stamina * 120; // 120=green, 0=red
+        bar.style.backgroundColor = `hsl(${hue}, 70%, 50%)`;
+      }
+
       this.happiness = Math.max(0, this.happiness - dt * 0.08);
       const wagSpeed = 4 + (this.happiness / 100) * 8;
       this.headGroup.rotation.y = Math.sin(t * 1.5 + this.id) * 0.2;
@@ -1579,11 +1593,18 @@ class Dog {
         if (this.state === 1) {
           if (!this.currentDuckMesh.userData.claimedBy) {
             this.currentDuckMesh.userData.claimedBy = this;
-            this.currentDuckMesh.position.set(0, 0, 0); 
-            this.currentDuckMesh.rotation.set(Math.PI/2, 0, 0); 
+            
+            // Ragdoll/Limp Effect: Randomize grab angle and position
+            this.currentDuckMesh.position.set(0, -0.2, -0.3); // Offset into mouth
+            // Randomly hang from neck, wing, or tail (random rotation)
+            const roll = Math.random() * Math.PI * 2;
+            const pitch = (Math.random() - 0.5) * Math.PI * 0.5;
+            this.currentDuckMesh.rotation.set(Math.PI/2 + pitch, roll, 0); 
+            
             this.mouthAnchor.add(this.currentDuckMesh);
             this.targetPos.copy(this.homePos);
             this.state = 2;
+            this.stamina = Math.max(0.1, this.stamina - 0.2); // Large drop on retrieval
             ducksFetched++;
             checkAchievements();
           } else {
