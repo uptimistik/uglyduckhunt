@@ -549,8 +549,8 @@ let lastFireTime = 0;
 function fire() {
   const now = Date.now();
   
-  // 1-second cooldown during gameplay (shotgun pump action), 300ms during calibration
-  const cooldown = state.calib.done ? 1000 : 300;
+  // Tight cooldown for responsiveness; 300ms during calibration
+  const cooldown = state.calib.done ? 300 : 300;
   
   if (now - lastFireTime < cooldown) return; 
   lastFireTime = now;

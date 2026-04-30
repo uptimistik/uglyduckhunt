@@ -32,20 +32,15 @@ public class CapacitorVolumeButtonsPlugin: CAPPlugin {
     private let implementation = CapacitorVolumeButtons()
     private let centerLevel: Float = 0.5
     private var audioLevel: Float = 0.5
-    private var isResetting: Bool = false
 
     override public func load() {
         let audioSession = AVAudioSession.sharedInstance()
         do {
             try audioSession.setActive(true, options: [])
+            audioLevel = centerLevel
             audioSession.addObserver(self, forKeyPath: "outputVolume",
                                      options: NSKeyValueObservingOptions.new, context: nil)
-            isResetting = true
             MPVolumeView.setVolume(centerLevel)
-            audioLevel = centerLevel
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                self?.isResetting = false
-            }
         } catch {
             print("Error loading CapacitorVolumeButtonsPlugin")
         }
@@ -53,7 +48,6 @@ public class CapacitorVolumeButtonsPlugin: CAPPlugin {
 
     public override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
         guard keyPath == "outputVolume" else { return }
-        if isResetting { return }
 
         let audioSession = AVAudioSession.sharedInstance()
         let newLevel = audioSession.outputVolume
@@ -66,13 +60,10 @@ public class CapacitorVolumeButtonsPlugin: CAPPlugin {
             return
         }
 
-        // After every press, snap back to the center so the next press
-        // (in either direction) is guaranteed to register.
-        isResetting = true
-        MPVolumeView.setVolume(centerLevel)
+        // After every press, snap back to the center immediately.
+        // Setting audioLevel BEFORE the volume change prevents the reset from
+        // triggering another event (newLevel == audioLevel).
         audioLevel = centerLevel
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
-            self?.isResetting = false
-        }
+        MPVolumeView.setVolume(centerLevel)
     }
 }

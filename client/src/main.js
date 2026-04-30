@@ -1977,8 +1977,35 @@ function fireShot(playerId) {
   // Per-player counter
   p.shots++;
 
+  // --- 1. Hit detection FIRST (latency-critical) ---
+  ndc.set(THREE.MathUtils.clamp(p.aim.sx, -1, 1), THREE.MathUtils.clamp(p.aim.sy, -1, 1));
+  raycaster.setFromCamera(ndc, camera);
+
+  let hitDuck = null;
+  let minHitDist = Infinity;
+
+  // 1a. Exact mesh intersection first
+  const duckMeshes = [];
+  ducks.forEach(d => { if (d.userData.alive) d.traverse(o => { if (o.isMesh) duckMeshes.push(o); }); });
+  const exactHits = raycaster.intersectObjects(duckMeshes, false);
+
+  if (exactHits.length > 0) {
+    hitDuck = exactHits[0].object.userData.duck;
+  } else {
+    // 1b. Aim-assist thick radius (forgiving hitbox)
+    for (const d of ducks) {
+      if (!d.userData.alive) continue;
+      const dist = Math.sqrt(raycaster.ray.distanceSqToPoint(d.position));
+      if (dist < 3.5 && dist < minHitDist) {
+        minHitDist = dist;
+        hitDuck = d;
+      }
+    }
+  }
+
+  // --- 2. Visual effects AFTER hit is known (defer heavy work) ---
   recoilPhase = 1.0;
-  triggerMuzzleFlash();
+  requestAnimationFrame(() => triggerMuzzleFlash());
 
   // Crosshair punch effect
   p.ch.classList.add('fire');
@@ -1990,32 +2017,6 @@ function fireShot(playerId) {
   document.body.appendChild(flash);
   requestAnimationFrame(() => { flash.style.background = 'rgba(0,0,0,0)'; });
   setTimeout(() => flash.remove(), 250);
-
-  // Use THIS player's aim, not a global.
-  ndc.set(THREE.MathUtils.clamp(p.aim.sx, -1, 1), THREE.MathUtils.clamp(p.aim.sy, -1, 1));
-  raycaster.setFromCamera(ndc, camera);
-
-  let hitDuck = null;
-  let minHitDist = Infinity;
-
-  // 1. Exact mesh intersection first
-  const duckMeshes = [];
-  ducks.forEach(d => { if (d.userData.alive) d.traverse(o => { if (o.isMesh) duckMeshes.push(o); }); });
-  const exactHits = raycaster.intersectObjects(duckMeshes, false);
-
-  if (exactHits.length > 0) {
-    hitDuck = exactHits[0].object.userData.duck;
-  } else {
-    // 2. Aim-assist thick radius (forgiving hitbox)
-    for (const d of ducks) {
-      if (!d.userData.alive) continue;
-      const dist = Math.sqrt(raycaster.ray.distanceSqToPoint(d.position));
-      if (dist < 3.5 && dist < minHitDist) {
-        minHitDist = dist;
-        hitDuck = d;
-      }
-    }
-  }
 
   if (hitDuck) {
     // First shot to land wins (shared duck pool, race for kills).
