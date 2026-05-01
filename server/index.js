@@ -202,6 +202,20 @@ io.on('connection', (socket) => {
     socket.to(roomCode).emit('calib_done', { playerId: socket.id });
   });
 
+  // Relay voice commands from controller to screen (fallback when WebRTC unavailable)
+  socket.on('voice_command', (data) => {
+    const { roomCode, command, target, transcript } = data;
+    const screenSocketId = roomScreens.get(roomCode);
+    if (!screenSocketId) return;
+    io.to(screenSocketId).emit('voice_command', {
+      playerId: socket.id,
+      command,
+      target,
+      transcript
+    });
+    console.log(`Voice command from ${socket.id}: ${command} (${transcript})`);
+  });
+
   // Relay calibration_complete from screen back to controller
   socket.on('calibration_complete', (data) => {
     const { roomCode, to } = data;

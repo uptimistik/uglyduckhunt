@@ -1,9 +1,13 @@
 import './style.css';
 import { io } from 'socket.io-client';
+import { Capacitor } from '@capacitor/core';
 import { CapacitorVolumeButtons } from 'capacitor-volume-buttons';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { CapacitorFlash } from '@capgo/capacitor-flash';
 import { BarcodeScanner, BarcodeFormat } from '@capacitor-mlkit/barcode-scanning';
+
+// Platform detection: QR scanner only works in native iOS/Android
+const isNative = Capacitor.isNativePlatform();
 
 // ============================================================
 // Air Mouse Controller — v2
@@ -103,7 +107,7 @@ document.querySelector('#app').innerHTML = `
       </div>
 
       <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 8px;">
-        <button id="scanBtn" class="primary" style="background:#ff9d00; color:#000;">SCAN QR CODE</button>
+        <button id="scanBtn" class="primary" style="background:#ff9d00; color:#000; ${isNative ? '' : 'display:none;'}">SCAN QR CODE</button>
         <button id="connectBtn" class="primary">CONNECT</button>
         <button id="enableSensorsBtn" class="secondary">ENABLE SENSORS</button>
       </div>
@@ -134,7 +138,9 @@ document.querySelector('#app').innerHTML = `
           <label>Muzzle Flash</label>
           <input type="checkbox" id="torchToggle" checked />
         </div>
-        <button id="recalibBtnBlank" class="secondary" style="margin-top:20px;">RECALIBRATE</button>
+        <button id="voiceBtnBlank" class="secondary" style="margin-top:10px; background:#ff9d00; color:#000; font-weight:800;">ENABLE VOICE</button>
+        <button id="recalibBtnBlank" class="secondary" style="margin-top:10px;">RECALIBRATE</button>
+        <div id="voiceStatusBlank" style="font-size:11px; color:#888; margin-top:5px;"></div>
       </div>
     </section>
 
@@ -181,7 +187,9 @@ let connectionMode = 'cloud'; // 'cloud' or 'local'
 
 $('modeCloud').addEventListener('click', () => setMode('cloud'));
 $('modeLocal').addEventListener('click', () => setMode('local'));
-$('scanBtn').addEventListener('click', startScan);
+if (isNative) {
+  $('scanBtn').addEventListener('click', startScan);
+}
 
 async function startScan() {
   try {
@@ -598,6 +606,8 @@ function sendEvent(type, payload) {
     state.socket.emit('calib_done', state.roomCode);
   } else if (type === 'calib_state') {
     state.socket.emit('calib_state', { roomCode: state.roomCode, to: state.screenId, ...(payload || {}) });
+  } else if (type === 'voice_command') {
+    state.socket.emit('voice_command', { roomCode: state.roomCode, ...(payload || {}) });
   }
 }
 
@@ -1083,4 +1093,125 @@ function setupVolumeTriggers() {
   } catch (e) {
     console.warn('Volume button plugin unavailable:', e);
   }
+}
+
+// ---------------- Voice Recognition ----------------
+// Phone mic captures commands, sends to PC for execution
+let isVoiceActive = false;
+let voiceRecognition = null;
+const SpeechRecognitionCtrl = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+function initVoiceRecognition() {
+  if (!SpeechRecognitionCtrl) {
+    $('voiceStatusBlank').textContent = 'Voice not supported';
+    return false;
+  }
+  
+  voiceRecognition = new SpeechRecognitionCtrl();
+  voiceRecognition.continuous = true;
+  voiceRecognition.lang = 'en-US';
+  voiceRecognition.interimResults = true;
+  
+  let finalTranscript = '';
+  let interimTranscript = '';
+  
+  voiceRecognition.onresult = (event) => {
+    interimTranscript = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const transcript = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        finalTranscript = transcript;
+      } else {
+        interimTranscript += transcript;
+      }
+    }
+    
+    const heard = (finalTranscript || interimTranscript).toLowerCase().trim();
+    if (heard) {
+      $('voiceStatusBlank').textContent = `Heard: "${heard}"`;
+      
+      // Parse dog commands
+      const dogNames = ['goldie', 'rusty', 'snowy'];
+      const commands = ['sit', 'fetch', 'come', 'here', 'stay', 'good boy', 'good girl'];
+      
+      let targetDog = null;
+      let command = null;
+      
+      for (const name of dogNames) {
+        if (heard.includes(name)) {
+          targetDog = name;
+          break;
+        }
+      }
+      
+      for (const cmd of commands) {
+        if (heard.includes(cmd)) {
+          command = cmd;
+          break;
+        }
+      }
+      
+      // Special cases
+      if (heard.includes('fetch') || heard.includes('get it') || heard.includes('get that')) {
+        command = 'fetch';
+      } else if (heard.includes('come') || heard.includes('here')) {
+        command = 'come';
+      } else if (heard.includes('sit') || heard.includes('stay')) {
+        command = 'sit';
+      } else if (heard.includes('good boy') || heard.includes('good girl') || heard.includes('treat')) {
+        command = 'treat';
+      }
+      
+      if (command) {
+        // Send to PC via WebRTC/socket
+        sendEvent('voice_command', {
+          command: command,
+          target: targetDog,
+          transcript: heard
+        });
+        $('voiceStatusBlank').style.color = '#4caf50';
+        setTimeout(() => { $('voiceStatusBlank').style.color = '#888'; }, 500);
+      }
+    }
+  };
+  
+  voiceRecognition.onerror = (e) => {
+    console.error('Voice error:', e);
+    $('voiceStatusBlank').textContent = `Error: ${e.error}`;
+    isVoiceActive = false;
+    $('voiceBtnBlank').textContent = 'ENABLE VOICE';
+    $('voiceBtnBlank').style.background = '#ff9d00';
+  };
+  
+  voiceRecognition.onend = () => {
+    if (isVoiceActive) {
+      voiceRecognition.start(); // Restart if still active
+    }
+  };
+  
+  return true;
+}
+
+// Wire up voice button
+if (SpeechRecognitionCtrl) {
+  initVoiceRecognition();
+  $('voiceBtnBlank').addEventListener('click', () => {
+    isVoiceActive = !isVoiceActive;
+    if (isVoiceActive) {
+      voiceRecognition.start();
+      $('voiceBtnBlank').textContent = 'VOICE ACTIVE';
+      $('voiceBtnBlank').style.background = '#4caf50';
+      $('voiceStatusBlank').textContent = 'Listening for dog commands...';
+      $('voiceStatusBlank').style.color = '#fff';
+    } else {
+      voiceRecognition.stop();
+      $('voiceBtnBlank').textContent = 'ENABLE VOICE';
+      $('voiceBtnBlank').style.background = '#ff9d00';
+      $('voiceStatusBlank').textContent = 'Voice paused';
+      $('voiceStatusBlank').style.color = '#888';
+    }
+  });
+} else {
+  $('voiceBtnBlank').style.display = 'none';
+  $('voiceStatusBlank').textContent = 'Voice API not available';
 }

@@ -436,6 +436,12 @@ function setupRTCFor(playerId) {
       case 'calib_done':
         $('calib-overlay').style.display = 'none';
         break;
+      case 'voice_command':
+        if (d.command) {
+          handleDogCommand(d.command, d.target);
+          console.log(`[Voice] ${d.target || 'any'}: ${d.command} (${d.transcript})`);
+        }
+        break;
     }
   };
 
@@ -1987,6 +1993,14 @@ socket.on('g', (data) => {
 socket.on('trigger', (info) => {
   const id = info?.playerId || Array.from(players.keys())[0];
   fireShot(id);
+});
+
+// Voice commands via server relay (fallback when WebRTC unavailable)
+socket.on('voice_command', (info) => {
+  if (info?.command) {
+    handleDogCommand(info.command, info.target);
+    console.log(`[Voice via relay] ${info.target || 'any'}: ${info.command}`);
+  }
 });
 
 function updateLaser() {
