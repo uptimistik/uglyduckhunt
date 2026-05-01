@@ -27,6 +27,23 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, ts: Date.now() });
 });
 
+// Returns the primary LAN IP of this machine so the browser client can build
+// a QR code pointing at the correct address (not localhost).
+app.get('/lan-ip', (req, res) => {
+  const nets = os.networkInterfaces();
+  let ip = 'localhost';
+  for (const iface of Object.values(nets)) {
+    for (const addr of iface) {
+      if (addr.family === 'IPv4' && !addr.internal) {
+        ip = addr.address;
+        break;
+      }
+    }
+    if (ip !== 'localhost') break;
+  }
+  res.json({ ip, port: PORT });
+});
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {

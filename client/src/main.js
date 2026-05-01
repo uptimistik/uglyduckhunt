@@ -243,6 +243,29 @@ if (isElectron) {
     
     console.log('Running in Electron. Server Info:', info);
   });
+} else {
+  // Browser mode: ask the server for its LAN IP, fall back to window.location.hostname.
+  // The controller app connects to the signaling server, not to this page's host,
+  // so we need to show the signaling server's IP in the QR.
+  const signalingHost = new URL(SOCKET_URL).hostname;
+  const signalingPort = new URL(SOCKET_URL).port || '3000';
+  const isLocal = signalingHost === 'localhost' || /^192\.|^10\.|^172\./.test(signalingHost);
+
+  if (isLocal) {
+    fetch(`http://${signalingHost}:${signalingPort}/lan-ip`)
+      .then(r => r.ok ? r.json() : null)
+      .catch(() => null)
+      .then(data => {
+        const ip = data?.ip || signalingHost;
+        const infoPanel = $('desktop-connect-info');
+        if (infoPanel) {
+          infoPanel.style.display = 'block';
+          $('local-ip-display').textContent = ip;
+          const qrData = encodeURIComponent(`http://${ip}:${signalingPort}/?r=${roomCode}`);
+          $('qr-img').src = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${qrData}`;
+        }
+      });
+  }
 }
 // ============================================================================
 // MULTI-PLAYER STATE
