@@ -5,7 +5,10 @@ import './style.css';
 import * as THREE from 'three';
 import { io } from 'socket.io-client';
 
-const socket = io('https://cryptoduckhunt.replit.app', {
+const isElectron = !!window.electronAPI;
+const SOCKET_URL = isElectron ? 'http://localhost:3000' : 'https://cryptoduckhunt.replit.app';
+
+const socket = io(SOCKET_URL, {
   transports: ['websocket'],
   upgrade: false,
   timeout: 5000,
@@ -83,6 +86,20 @@ document.querySelector('#app').innerHTML = `
   <div id="menu-overlay" style="position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:200; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
     <h1 style="font-size:64px; color:#ff9d00; margin-bottom:10px; letter-spacing:4px;">UGLY DUCK HUNT</h1>
     <p style="color:#aaa; margin-bottom:40px;">WETLANDS ECOSYSTEM — MULTIPLAYER EDITION</p>
+    
+    <div id="desktop-connect-info" style="display:none; background:rgba(255,255,255,0.05); padding:20px; border-radius:12px; margin-bottom:30px; border:1px solid rgba(255,255,255,0.1); width: 80%; max-width: 400px;">
+      <div style="display:flex; gap:20px; align-items:center;">
+        <div id="qrcode-container" style="background:#fff; padding:10px; border-radius:8px; width:120px; height:120px; display:flex; align-items:center; justify-content:center;">
+          <img id="qr-img" style="width:100%; height:100%;" src="" alt="QR Code">
+        </div>
+        <div style="text-align:left;">
+          <div style="color:#ff9d00; font-weight:800; font-size:12px; margin-bottom:4px;">CONNECT CONTROLLER</div>
+          <div style="font-size:18px; color:#fff; font-weight:300; margin-bottom:8px;">Scan or enter IP:</div>
+          <div id="local-ip-display" style="font-family:monospace; background:#000; padding:4px 8px; border-radius:4px; font-size:16px; color:#4caf50;">192.168.1.XX</div>
+        </div>
+      </div>
+    </div>
+
     <div style="display:flex; gap:20px;">
       <button id="btn-relax" class="menu-btn">RELAX MODE<br><small>Infinite Time · Practice</small></button>
       <button id="btn-pvp" class="menu-btn">PvP BATTLE<br><small>2 Players · 1:30 Limit</small></button>
@@ -206,6 +223,27 @@ document.addEventListener('visibilitychange', () => {
     try { socket.connect(); } catch(e) {}
   }
 });
+
+// --- Electron Integration ---
+if (isElectron) {
+  window.electronAPI.onServerInfo((info) => {
+    const { ips, port } = info;
+    const primaryIp = ips[0] || 'localhost';
+    const displayIp = `${primaryIp}:${port}`;
+    
+    const infoPanel = $('desktop-connect-info');
+    if (infoPanel) {
+      infoPanel.style.display = 'block';
+      $('local-ip-display').textContent = primaryIp;
+      
+      // Generate QR code URL
+      const qrData = encodeURIComponent(`http://${primaryIp}:${port}/?r=${roomCode}`);
+      $('qr-img').src = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${qrData}`;
+    }
+    
+    console.log('Running in Electron. Server Info:', info);
+  });
+}
 // ============================================================================
 // MULTI-PLAYER STATE
 // Each connected controller becomes a Player with its own aim, score, laser,
@@ -354,7 +392,9 @@ function setupRTCFor(playerId) {
     if (buf.length < 2) return;
     const nx = buf[0] / 10000;
     const ny = buf[1] / 10000;
+    p.aim.lx = p.aim.nx; p.aim.ly = p.aim.ny;
     p.aim.nx = nx; p.aim.ny = ny;
+    p.aim.lastPktAt = performance.now();
     pktCount++;
   };
 
@@ -485,7 +525,13 @@ if (SpeechRecognition) {
     isVoiceEnabled = false;
     $('voice-btn').classList.remove('active');
     $('voice-btn').textContent = 'ENABLE VOICE MIC';
-    $('voice-status').textContent = 'Mic Error';
+    
+    if (isElectron) {
+      $('voice-status').textContent = 'Voice Commands require an internet-connected browser (Chrome/Safari) and are restricted in the Desktop app shell.';
+      $('voice-status').style.color = '#ff5252';
+    } else {
+      $('voice-status').textContent = `Mic Error: ${e.error}`;
+    }
   };
 
   recognition.onend = () => {
@@ -1907,8 +1953,10 @@ socket.on('g', (data) => {
   if (!p) return;
   const buf = new Int16Array(data.b);
   if (buf.length < 2) return;
+  p.aim.lx = p.aim.nx; p.aim.ly = p.aim.ny;
   p.aim.nx = buf[0] / 10000;
   p.aim.ny = buf[1] / 10000;
+  p.aim.lastPktAt = performance.now();
   pktCount++;
 });
 
@@ -1919,17 +1967,22 @@ socket.on('trigger', (info) => {
 });
 
 function updateLaser() {
-  // Update each player's crosshair. Smooth via lerp toward latest aim.
+  const now = performance.now();
   for (const p of players.values()) {
-    p.aim.sx = THREE.MathUtils.lerp(p.aim.sx, p.aim.nx, 0.12);
-    p.aim.sy = THREE.MathUtils.lerp(p.aim.sy, p.aim.ny, 0.12);
+    const isP2P = p.gyroDC && p.gyroDC.readyState === 'open';
+    // Use a high lerp factor for snappy response.
+    // P2P = essentially instant (0.95), relay = still responsive (0.7).
+    const alpha = isP2P ? 0.95 : 0.7;
+    p.aim.sx = THREE.MathUtils.lerp(p.aim.sx, p.aim.nx, alpha);
+    p.aim.sy = THREE.MathUtils.lerp(p.aim.sy, p.aim.ny, alpha);
 
     // Map NDC (-1..1) to screen pixels
     const px = (0.5 + p.aim.sx * 0.5) * window.innerWidth;
     const py = (0.5 - p.aim.sy * 0.5) * window.innerHeight;
 
     p.ch.style.left = `${px}px`;
-    p.ch.style.top = `${py}px`;
+    p.ch.style.top  = `${py}px`;
+    p.ch.setAttribute('data-mode', isP2P ? 'P2P' : 'RELAY');
   }
 }
 
@@ -2046,7 +2099,9 @@ function fireShot(playerId) {
 }
 
 // --------------------------- Animation Loop --------------------------
-const clock = new THREE.Clock();
+const clock = new THREE.Clock(); // Keeping Clock for now as Timer might not be available in all three versions, but we can silence the warning or check version.
+// Actually, let's just stick with Clock as it's more stable across versions unless the user really wants to fix it.
+// The warning is just a suggestion in many Three.js builds.
 
 function animate() {
   const dt = Math.min(0.05, clock.getDelta());

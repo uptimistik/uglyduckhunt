@@ -7,6 +7,20 @@ const os = require('os');
 const app = express();
 app.use(cors());
 
+// Serve static files from the client/dist directory if it exists
+const path = require('path');
+const fs = require('fs');
+
+function setupStaticServing(clientPath) {
+  const clientDistPath = clientPath || path.join(__dirname, '../client/dist');
+  if (fs.existsSync(clientDistPath)) {
+    console.log(`Serving static files from: ${clientDistPath}`);
+    app.use(express.static(clientDistPath));
+  } else {
+    console.warn(`Static files directory not found: ${clientDistPath}`);
+  }
+}
+
 // Health check endpoint — visit http://<mac-ip>:3000/health from the phone
 // browser to verify the device can reach the server before launching the app.
 app.get('/health', (req, res) => {
@@ -82,6 +96,13 @@ io.on('connection', (socket) => {
   // instead of queued (queuing causes rubber-banding).
   // RELAY: High-frequency binary gyro data.
   // We use a dedicated short name 'g' and volatile emit to minimize overhead.
+  
+  // WebRTC Signaling Relay
+  socket.on('signal', (payload) => {
+    // payload: { to: socketId, signal: data }
+    io.to(payload.to).emit('signal', { from: socket.id, signal: payload.signal });
+  });
+
   socket.on('g', (buf) => {
     const rc = socket.data?.roomCode;
     if (!rc) return;
@@ -200,16 +221,63 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\nServer listening on port ${PORT}`);
-  console.log('Reachable LAN addresses for the phone:');
-  const nets = os.networkInterfaces();
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name] || []) {
-      if (net.family === 'IPv4' && !net.internal) {
-        console.log(`  http://${net.address}:${PORT}     (interface: ${name})`);
+function startServer(requestedPort = 3000, clientPath = null) {
+  setupStaticServing(clientPath);
+  
+  return new Promise((resolve, reject) => {
+    let port = requestedPort;
+    const serverInstance = server.listen(port, '0.0.0.0');
+
+    serverInstance.on('listening', () => {
+      console.log(`\nServer listening on port ${port}`);
+      console.log('Reachable LAN addresses for the phone:');
+      const nets = os.networkInterfaces();
+      const allIps = [];
+      for (const name of Object.keys(nets)) {
+        for (const net of nets[name] || []) {
+          if (net.family === 'IPv4' && !net.internal) {
+            allIps.push({ address: net.address, name });
+          }
+        }
       }
-    }
-  }
-  console.log('\nTest from phone browser: open one of the URLs above plus /health\n');
-});
+      
+      // Sort: prioritize 192.168.*, then 10.*, then others. 
+      // Also prioritize en0/en1 (mac wifi/ethernet) over bridge/vbox/vpn.
+      allIps.sort((a, b) => {
+        const score = (addr, name) => {
+          let s = 0;
+          if (addr.startsWith('192.168.')) s += 10;
+          if (addr.startsWith('10.')) s += 5;
+          if (name.startsWith('en')) s += 20; // Mac primary interfaces
+          if (name.startsWith('eth') || name.startsWith('wlan')) s += 20; // Linux primary
+          if (name.includes('bridge') || name.includes('vbox') || name.includes('vpn')) s -= 50;
+          return s;
+        };
+        return score(b.address, b.name) - score(a.address, a.name);
+      });
+
+      const ips = allIps.map(ip => {
+        console.log(`  http://${ip.address}:${port}     (interface: ${ip.name})`);
+        return ip.address;
+      });
+      console.log('\nTest from phone browser: open one of the URLs above plus /health\n');
+      resolve({ server: serverInstance, io, port, ips });
+    });
+
+    serverInstance.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.log(`Port ${port} is busy, trying ${port + 1}...`);
+        port++;
+        serverInstance.listen(port, '0.0.0.0');
+      } else {
+        reject(err);
+      }
+    });
+  });
+}
+
+if (require.main === module) {
+  startServer(PORT);
+}
+
+module.exports = { startServer };

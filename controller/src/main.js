@@ -3,6 +3,7 @@ import { io } from 'socket.io-client';
 import { CapacitorVolumeButtons } from 'capacitor-volume-buttons';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { CapacitorFlash } from '@capgo/capacitor-flash';
+import { BarcodeScanner, BarcodeFormat } from '@capacitor-mlkit/barcode-scanning';
 
 // ============================================================
 // Air Mouse Controller — v2
@@ -22,15 +23,15 @@ import { CapacitorFlash } from '@capgo/capacitor-flash';
 //  - Touch the aim pad to aim manually if sensors aren't available.
 // ============================================================
 
-const EMIT_HZ = 60;
+const EMIT_HZ = 90;
 const DEFAULT_HALF = 25 * Math.PI / 180; // fallback half-FOV until user calibrates
 const MIN_HALF = 3 * Math.PI / 180;      // safety floor so divisions never blow up
 
 // Adaptive one-euro-style filter parameters. Low cutoff when the user is
 // nearly still (kills jitter) but the cutoff opens up automatically as soon
 // as they aim quickly, so there's almost no lag during fast motion.
-const MIN_CUTOFF = 2.0;   // Hz, baseline cutoff (higher = less lag)
-const BETA       = 0.4;   // Higher beta = much more responsive during movement
+const MIN_CUTOFF = 4.5;   // Higher = less lag, slightly more raw jitter
+const BETA       = 0.7;   // Higher = more responsive to fast motion
 const D_CUTOFF   = 1.0;   // Hz, smoothing for the derivative itself
 
 const state = {
@@ -65,91 +66,216 @@ const state = {
 // ---------------- UI ----------------
 document.querySelector('#app').innerHTML = `
   <div class="ctrl-root">
-    <header class="bar">
-      <div class="logo">🎯 Air Mouse</div>
+    <div class="top-bar">
       <div class="badge" id="connBadge">Disconnected</div>
-    </header>
+    </div>
 
     <section class="card" id="setupCard">
-      <div class="logo" style="font-size: 14px; margin-bottom: 20px; color: #ff9d00;">Connecting to Production Cloud...</div>
-      <label>Room Code</label>
-      <input id="roomInput" type="text" placeholder="ABCD" maxlength="6" autocapitalize="characters" />
-      <button id="connectBtn" class="primary">Connect</button>
-      <button id="enableSensorsBtn" class="secondary">Enable Motion Sensors</button>
-      <div class="hint">Tip: tap <b>Enable Motion Sensors</b> first — iOS requires a tap before granting access.</div>
+      <div class="mode-toggle">
+        <button id="modeCloud" class="active">Cloud</button>
+        <button id="modeLocal">Local</button>
+      </div>
+
+      <div id="cloudFields">
+        <label>Room Code</label>
+        <input id="roomInput" type="text" placeholder="ABCD" maxlength="4" autocapitalize="characters" />
+      </div>
+
+      <div id="localFields" class="hidden">
+        <div class="row">
+          <div>
+            <label>PC IP Address</label>
+            <input id="ipInput" type="text" placeholder="192.168.1.XX" />
+          </div>
+          <div style="width: 100px;">
+            <label>Room</label>
+            <input id="roomInputLocal" type="text" placeholder="ABCD" maxlength="4" autocapitalize="characters" />
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 8px;">
+        <button id="scanBtn" class="primary" style="background:#ff9d00; color:#000;">SCAN QR CODE</button>
+        <button id="connectBtn" class="primary">CONNECT</button>
+        <button id="enableSensorsBtn" class="secondary">ENABLE SENSORS</button>
+      </div>
       <div id="setupStatus" class="status"></div>
     </section>
 
     <section class="card hidden" id="calibCard">
-      <h2 id="calibTitle">Calibration</h2>
-      <p id="calibSub" class="hint"></p>
-      <div class="calib-target" id="calibTarget">
+      <h2 id="calibTitle" style="margin-top:0; font-size:20px;">Calibration</h2>
+      <p id="calibSub" class="hint" style="margin-bottom:10px;"></p>
+      <div class="calib-target" id="calibTarget" style="height:150px;">
         <div class="calib-arrow" id="calibArrow">·</div>
       </div>
-      <button id="calibCaptureBtn" class="primary">Capture</button>
-      <button id="calibRestartBtn" class="secondary">Restart calibration</button>
+      <button id="calibCaptureBtn" class="primary">CAPTURE</button>
+      <button id="calibRestartBtn" class="secondary">RESTART</button>
       <div id="calibStatus" class="status"></div>
     </section>
 
-    <section class="card hidden" id="blankCard" style="text-align:center; height:80vh; display:flex; flex-direction:column; justify-content:center; align-items:center; user-select:none;">
-      <h2 style="color:#4caf50; font-size:32px; margin-bottom:10px;">Connected</h2>
-      <p style="color:#aaa; font-size:18px;">Look at your PC screen.</p>
+    <section class="card hidden" id="blankCard" style="text-align:center; flex:1; display:flex; flex-direction:column; justify-content:center; align-items:center;">
+      <h2 style="color:#4caf50; font-size:28px; margin-bottom:5px;">CONNECTED</h2>
+      <p style="color:#888; font-size:16px;">Aim at your PC screen.</p>
       
-      <div style="margin-top: 40px; display:flex; flex-direction:column; align-items:center; gap:20px; width:80%;">
-        <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
-          <label style="color:#eee; font-size:16px;">Vibrate</label>
-          <input type="checkbox" id="vibrateToggle" checked style="width:24px; height:24px;" />
+      <div style="margin-top: 30px; display:flex; flex-direction:column; gap:15px; width:100%;">
+        <div class="toggle-row">
+          <label>Vibrate</label>
+          <input type="checkbox" id="vibrateToggle" checked />
         </div>
-        <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
-          <label style="color:#eee; font-size:16px;">Muzzle Flash (Torch)</label>
-          <input type="checkbox" id="torchToggle" checked style="width:24px; height:24px;" />
+        <div class="toggle-row">
+          <label>Muzzle Flash</label>
+          <input type="checkbox" id="torchToggle" checked />
         </div>
+        <button id="recalibBtnBlank" class="secondary" style="margin-top:20px;">RECALIBRATE</button>
       </div>
     </section>
 
-    <section class="card hidden" id="playCard">
-      <div class="play-status">
-        <div><b>Aim with the phone.</b> Press <b>Volume Up/Down</b> to fire.</div>
+    <section class="card hidden" id="playCard" style="text-align:center;">
+      <div class="play-status" style="border:none; background:transparent; padding:0;">
+        <p style="font-size:18px; color:#fff;"><b>Ready to Play</b></p>
+        <p style="color:#888; font-size:14px; margin-bottom:20px;">Use Volume buttons to fire.</p>
       </div>
-      <button id="fireBtn" class="fire">FIRE (tap)</button>
-      <button id="recalibBtn" class="secondary">Recalibrate</button>
-
-      <details class="diag">
-        <summary>Live diagnostics</summary>
-        <div class="grid">
-          <div><span>orientation events</span><b id="dOri">0</b></div>
-          <div><span>motion events</span><b id="dMot">0</b></div>
-          <div><span>α (yaw)</span><b id="dA">—</b></div>
-          <div><span>β (pitch)</span><b id="dB">—</b></div>
-          <div><span>γ (roll)</span><b id="dG">—</b></div>
-          <div><span>nx, ny</span><b id="dN">0, 0</b></div>
-          <div><span>emit rate</span><b id="dHz">0</b></div>
-          <div><span>relay ok</span><b id="dROk">0</b></div>
-          <div><span>relay miss</span><b id="dRMiss">0</b></div>
-        </div>
-      </details>
-
-      <div id="playStatus" class="status"></div>
+      <button id="recalibBtn" class="secondary">RECALIBRATE</button>
+      <div id="playStatus" class="status" style="font-size:11px; margin-top:20px;"></div>
     </section>
   </div>
 `;
 
-const $ = (id) => document.getElementById(id);
+const $ = (id) => document.getElementById(id) || { 
+  style: {}, 
+  classList: { add:()=>{} , remove:()=>{}, contains:()=>false, toggle:()=>{} }, 
+  appendChild:()=>{}, 
+  remove:()=>{}, 
+  addEventListener:()=>{}, 
+  get value() {return ""}, 
+  set value(v) {}, 
+  get textContent() {return ""}, 
+  set textContent(v) {},
+  animate: () => ({ finished: Promise.resolve() })
+};
+
 const setupCard = $('setupCard');
 const calibCard = $('calibCard');
 const playCard = $('playCard');
 const blankCard = $('blankCard');
 const playStatus = $('playStatus');
 const setupStatus = $('setupStatus');
+const calibStatus = $('calibStatus');
+const calibTitle = $('calibTitle');
+const calibSub = $('calibSub');
 const connBadge = $('connBadge');
+
+if (state.serverIP && state.serverIP !== 'cryptoduckhunt.replit.app') {
+  $('ipInput').value = state.serverIP;
+}
+
+let connectionMode = 'cloud'; // 'cloud' or 'local'
+
+$('modeCloud').addEventListener('click', () => setMode('cloud'));
+$('modeLocal').addEventListener('click', () => setMode('local'));
+$('scanBtn').addEventListener('click', startScan);
+
+async function startScan() {
+  try {
+    const granted = await requestCameraPermission();
+    if (!granted) {
+      setupStatus.textContent = 'Camera permission denied.';
+      return;
+    }
+
+    // Hide the app UI to show the scanner underneath
+    document.body.classList.add('scanner-active');
+    
+    // Add a stop button to the UI
+    const stopBtn = document.createElement('button');
+    stopBtn.id = 'stopScanBtn';
+    stopBtn.textContent = 'CANCEL SCAN';
+    stopBtn.className = 'primary';
+    stopBtn.style.position = 'fixed';
+    stopBtn.style.bottom = '40px';
+    stopBtn.style.left = '20px';
+    stopBtn.style.right = '20px';
+    stopBtn.style.zIndex = '9999';
+    document.body.appendChild(stopBtn);
+    
+    stopBtn.onclick = async () => {
+      await BarcodeScanner.stopScan();
+      document.body.classList.remove('scanner-active');
+      stopBtn.remove();
+    };
+
+    const { barcodes } = await BarcodeScanner.scan({
+      formats: [BarcodeFormat.QrCode],
+    });
+
+    console.log('Scan result barcodes:', barcodes);
+    document.body.classList.remove('scanner-active');
+    stopBtn.remove();
+
+    if (barcodes.length > 0) {
+      const val = barcodes[0].displayValue;
+      console.log('Scanned QR:', val);
+      parseScannedUrl(val);
+    }
+  } catch (err) {
+    console.error('Scan error:', err);
+    setupStatus.textContent = 'Scanner error: ' + err.message;
+    document.body.classList.remove('scanner-active');
+    const stopBtn = document.getElementById('stopScanBtn');
+    if (stopBtn) stopBtn.remove();
+  }
+}
+
+async function requestCameraPermission() {
+  const { camera } = await BarcodeScanner.requestPermissions();
+  return camera === 'granted' || camera === 'camera';
+}
+
+function parseScannedUrl(urlStr) {
+  console.log('Parsing scanned URL:', urlStr);
+  try {
+    const url = new URL(urlStr);
+    const ip = url.hostname;
+    const room = url.searchParams.get('r');
+    
+    console.log('Detected IP:', ip, 'Room:', room);
+    
+    setMode('local');
+    $('ipInput').value = ip;
+    if (room) {
+      $('roomInputLocal').value = room;
+    }
+    setupStatus.textContent = `Scanned IP: ${ip}. Connecting...`;
+    
+    // Auto-connect after scan
+    setTimeout(onConnect, 500);
+  } catch (e) {
+    console.error('Failed to parse URL:', e);
+    setupStatus.textContent = 'Invalid QR code URL: ' + urlStr;
+  }
+}
+
+function setMode(mode) {
+  connectionMode = mode;
+  if (mode === 'cloud') {
+    $('modeCloud').classList.add('active');
+    $('modeLocal').classList.remove('active');
+    $('cloudFields').classList.remove('hidden');
+    $('localFields').classList.add('hidden');
+  } else {
+    $('modeCloud').classList.remove('active');
+    $('modeLocal').classList.add('active');
+    $('cloudFields').classList.add('hidden');
+    $('localFields').classList.remove('hidden');
+  }
+}
 
 $('connectBtn').addEventListener('click', onConnect);
 $('enableSensorsBtn').addEventListener('click', requestSensorPermissions);
 $('calibCaptureBtn').addEventListener('click', captureCalibStep);
 $('calibRestartBtn').addEventListener('click', startCalibrationWizard);
 $('recalibBtn').addEventListener('click', startCalibrationWizard);
-$('fireBtn').addEventListener('click', fire);
-$('fireBtn').addEventListener('touchstart', (e) => { e.preventDefault(); fire(); }, { passive: false });
+$('recalibBtnBlank').addEventListener('click', startCalibrationWizard);
 
 // ---------------- Permissions ----------------
 async function requestSensorPermissions() {
@@ -338,43 +464,30 @@ function relativeYawPitch() {
 // ---------------- Emit loop ----------------
 function emit() {
   const now = performance.now();
-  if (now - state.lastEmitAt < 1000 / EMIT_HZ) return;
+  // If P2P is active, we can go faster. On Socket, we slow down to avoid congestion.
+  const targetHz = (state.gyroDC && state.gyroDC.readyState === 'open') ? 60 : 45;
+  if (now - state.lastEmitAt < 1000 / targetHz) return;
   state.lastEmitAt = now;
 
-  let nx, ny;
+  let rnx = 0, rny = 0;
   if (state.qBase) {
     const { yaw, pitch } = relativeYawPitch();
-    let rnx = mapToNormalized(yaw,   state.calib.yawLeft,   state.calib.yawRight); // -1 at left, +1 at right
-    let rny = mapToNormalized(pitch, state.calib.pitchDown, state.calib.pitchUp);   // -1 at bottom, +1 at top
-    
-    // Apply One-Euro filter for jitter reduction
-    nx = oneEuro(state, 'fx', 'dx', rnx, now / 1000);
-    ny = oneEuro(state, 'fy', 'dy', rny, now / 1000);
-    state.primed = true;
-    state.lastT = now / 1000;
-  } else {
-    nx = 0; ny = 0;
+    rnx = mapToNormalized(yaw,   state.calib.yawLeft,   state.calib.yawRight);
+    rny = mapToNormalized(pitch, state.calib.pitchDown, state.calib.pitchUp);
   }
 
-  if (!Number.isFinite(nx) || !Number.isFinite(ny)) {
-    state.invalidEmitCount++;
-    playStatus.textContent = `Sensor packet invalid (${state.invalidEmitCount}). Holding last good target.`;
+  if (!Number.isFinite(rnx) || !Number.isFinite(rny)) {
     return;
   }
 
+  // Single pass of One-Euro filter for responsiveness + jitter reduction
   const tNow = now / 1000;
-  const fx = oneEuro(state.filt, 'x', 'dx', nx, tNow);
-  const fy = oneEuro(state.filt, 'y', 'dy', ny, tNow);
+  const fx = oneEuro(state.filt, 'x', 'dx', rnx, tNow);
+  const fy = oneEuro(state.filt, 'y', 'dy', rny, tNow);
   state.filt.lastT = tNow;
   state.filt.primed = true;
 
-  if (!Number.isFinite(fx) || !Number.isFinite(fy)) {
-    state.invalidEmitCount++;
-    state.filt.x = 0; state.filt.y = 0; state.filt.dx = 0; state.filt.dy = 0;
-    state.filt.primed = false;
-    playStatus.textContent = `Filter reset (${state.invalidEmitCount}).`;
-    return;
-  }
+  if (!Number.isFinite(fx) || !Number.isFinite(fy)) return;
 
   // Rolling 16-bit sequence
   state.gyroSeq = ((state.gyroSeq | 0) + 1) & 0xffff;
@@ -386,30 +499,32 @@ function emit() {
   buf[2] = state.gyroSeq;
 
   if (state.gyroDC && state.gyroDC.readyState === 'open') {
-    if (state.gyroDC.bufferedAmount < 64 * 1024) {
+    // Direct P2P path
+    if (state.gyroDC.bufferedAmount < 16384) {
       try { state.gyroDC.send(buf.buffer); } catch(e) {}
     }
   } else if (state.socket?.connected) {
+    // Relay path - use volatile to drop late packets
     state.socket.volatile.emit('g', buf.buffer);
   }
   updateDiag();
 }
 
 // Also drive emits at a steady cadence even if orientation events stall (e.g. manual aim, no sensors).
-setInterval(emit, 1000 / EMIT_HZ);
+setInterval(emit, 1000 / 45);
 
 // ---------------- Diagnostics ----------------
 let lastDiagAt = 0, lastEmitCount = 0, emitCount = 0;
 function updateDiag() {
   emitCount++;
-  $('dOri').textContent = state.orientationCount;
-  $('dMot').textContent = state.motionCount;
-  $('dA').textContent = state.lastRaw.alpha.toFixed(1);
-  $('dB').textContent = state.lastRaw.beta.toFixed(1);
-  $('dG').textContent = state.lastRaw.gamma.toFixed(1);
-  $('dN').textContent = `${state.filt.x.toFixed(2)}, ${state.filt.y.toFixed(2)} | bad:${state.invalidEmitCount}`;
-  $('dROk').textContent = String(state.relayOkCount);
-  $('dRMiss').textContent = String(state.relayMissCount);
+  const dOri = $('dOri'); if (dOri) dOri.textContent = state.orientationCount;
+  const dMot = $('dMot'); if (dMot) dMot.textContent = state.motionCount;
+  const dA = $('dA'); if (dA) dA.textContent = state.lastRaw.alpha.toFixed(1);
+  const dB = $('dB'); if (dB) dB.textContent = state.lastRaw.beta.toFixed(1);
+  const dG = $('dG'); if (dG) dG.textContent = state.lastRaw.gamma.toFixed(1);
+  const dN = $('dN'); if (dN) dN.textContent = `${state.filt.x.toFixed(2)}, ${state.filt.y.toFixed(2)} | bad:${state.invalidEmitCount}`;
+  const dROk = $('dROk'); if (dROk) dROk.textContent = String(state.relayOkCount);
+  const dRMiss = $('dRMiss'); if (dRMiss) dRMiss.textContent = String(state.relayMissCount);
   // Live preview during calibration: show where the phone is pointing inside the target box.
   const target = $('calibTarget');
   const arrow  = $('calibArrow');
@@ -422,7 +537,8 @@ function updateDiag() {
   if (now - lastDiagAt > 500) {
     const dt = (now - lastDiagAt) / 1000;
     const hz = Math.round((emitCount - lastEmitCount) / dt);
-    $('dHz').textContent = String(hz);
+    const dHz = $('dHz');
+    if (dHz) dHz.textContent = String(hz);
     lastDiagAt = now;
     lastEmitCount = emitCount;
   }
@@ -549,7 +665,7 @@ let lastFireTime = 0;
 function fire() {
   const now = Date.now();
   
-  // Tight cooldown for responsiveness; 300ms during calibration
+  // Tight cooldown so the shotgun feels responsive; 300ms during calibration
   const cooldown = state.calib.done ? 300 : 300;
   
   if (now - lastFireTime < cooldown) return; 
@@ -593,22 +709,61 @@ function flash() {
 
 // ---------------- Connection ----------------
 async function onConnect() {
-  state.roomCode = $('roomInput').value.trim().toUpperCase();
+  if (connectionMode === 'local') {
+    state.serverIP = $('ipInput').value.trim();
+    state.roomCode = $('roomInputLocal').value.trim().toUpperCase();
+    if (state.serverIP) localStorage.setItem('custom_ip', state.serverIP);
+  } else {
+    state.serverIP = 'cryptoduckhunt.replit.app';
+    state.roomCode = $('roomInput').value.trim().toUpperCase();
+  }
+
   if (!state.roomCode) {
     setupStatus.textContent = 'Room Code required.';
+    return;
+  }
+  if (connectionMode === 'local' && !state.serverIP) {
+    setupStatus.textContent = 'IP Address required for Local mode.';
     return;
   }
 
   // Make sure permissions have been asked at least once (no-op if not iOS gated).
   await requestSensorPermissions();
 
-  setupStatus.textContent = `Connecting to ${state.serverIP}…`;
-  
-  // Smart protocol detection: use https for Replit, http for local IPs
   const isReplit = state.serverIP.includes('replit.app') || state.serverIP.includes('repl.co');
   const protocol = isReplit ? 'https' : 'http';
   const port = isReplit ? '' : ':3000';
   const finalUrl = `${protocol}://${state.serverIP}${port}`;
+  
+  setupStatus.innerHTML = `Checking connection to <br><b>${finalUrl}</b>...`;
+  
+  // Preliminary health check
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
+    const resp = await fetch(`${finalUrl}/health`, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    console.log('Server health check OK');
+  } catch (err) {
+    console.warn('Health check failed:', err);
+    setupStatus.innerHTML = `<span style="color:#ff5252">Cannot reach PC at ${finalUrl}.</span><br><small>Check if Mac IP is correct (${state.serverIP}) and both devices are on same Wi-Fi.</small>`;
+    return;
+  }
+
+  setupStatus.textContent = `Connecting to ${state.serverIP}…`;
+  
+  console.log('Connecting to socket URL:', finalUrl);
+
+  if (state.socket?.connected) {
+    console.log('Socket already connected, skipping onConnect');
+    return;
+  }
+  
+  if (state.socket) {
+    console.log('Socket exists but not connected, closing old one first');
+    state.socket.disconnect();
+  }
 
   state.socket = io(finalUrl, {
     transports: ['websocket'],
@@ -619,15 +774,17 @@ async function onConnect() {
     // recover fast and keep trying forever.
     reconnection: true,
     reconnectionAttempts: Infinity,
-    reconnectionDelay: 500,      // start retrying quickly
-    reconnectionDelayMax: 3000,  // cap backoff at 3s so we never sit dead for long
+    reconnectionDelay: 1000,      // start retrying quickly
+    reconnectionDelayMax: 5000,   // cap backoff at 5s so we never sit dead for long
     randomizationFactor: 0.3,
   });
 
   state.socket.on('connect_error', (err) => {
+    const msg = `Connect error: ${err.message}. (URL: ${finalUrl})`;
+    console.error(msg);
     // Don't overwrite the "reconnecting" UI once we've been connected at least once.
     if (!state.hasEverConnected) {
-      setupStatus.textContent = `Connect error: ${err.message}. Check server IP, same Wi-Fi, and that server is running.`;
+      setupStatus.textContent = `${msg}. Ensure PC and phone are on the same Wi-Fi.`;
       connBadge.textContent = 'Error'; connBadge.className = 'badge bad';
     } else {
       connBadge.textContent = 'Reconnecting…'; connBadge.className = 'badge bad';
@@ -808,10 +965,10 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // --- Local IP Discovery / Custom Server (Hidden Feature) ---
-// Triple-tap the header to enter a custom IP (e.g. your Mac's local IP)
+// Triple-tap the top bar to reset (now using top-bar)
 let logoTaps = 0;
 let lastLogoTap = 0;
-document.querySelector('.header').addEventListener('click', () => {
+$('.top-bar').addEventListener('click', () => {
   const now = Date.now();
   if (now - lastLogoTap > 1000) logoTaps = 0;
   logoTaps++;
