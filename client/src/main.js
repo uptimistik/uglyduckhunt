@@ -1970,7 +1970,6 @@ function updateLaser() {
   const now = performance.now();
   for (const p of players.values()) {
     const isP2P = p.gyroDC && p.gyroDC.readyState === 'open';
-    // Use a high lerp factor for snappy response.
     // P2P = essentially instant (0.95), relay = still responsive (0.7).
     const alpha = isP2P ? 0.95 : 0.7;
     p.aim.sx = THREE.MathUtils.lerp(p.aim.sx, p.aim.nx, alpha);

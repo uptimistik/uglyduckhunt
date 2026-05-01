@@ -27,17 +27,25 @@ const EMIT_HZ = 90;
 const DEFAULT_HALF = 25 * Math.PI / 180; // fallback half-FOV until user calibrates
 const MIN_HALF = 3 * Math.PI / 180;      // safety floor so divisions never blow up
 
-// Adaptive one-euro-style filter parameters. Low cutoff when the user is
-// nearly still (kills jitter) but the cutoff opens up automatically as soon
-// as they aim quickly, so there's almost no lag during fast motion.
-const MIN_CUTOFF = 4.5;   // Higher = less lag, slightly more raw jitter
-const BETA       = 0.7;   // Higher = more responsive to fast motion
-const D_CUTOFF   = 1.0;   // Hz, smoothing for the derivative itself
+// Adaptive one-euro-style filter parameters.
+// MIN_CUTOFF: baseline smoothing at rest — lower = less jitter but more lag.
+// BETA: how fast the cutoff opens up with speed — lower = less overshoot on
+//   fast flicks (Android needs this lower than iOS because it delivers rawer
+//   sensor data, so spikes are larger and BETA amplifies them into overshoots).
+// D_CUTOFF: smoothing on the derivative estimate itself.
+const MIN_CUTOFF = 1.2;   // Hz  — baseline smoothing at rest
+const BETA       = 0.35;  //     — speed gain (0.15 was too sluggish, 0.4 overshot)
+const D_CUTOFF   = 1.0;   // Hz
+
+// Max normalised units the output can move in one 60 Hz frame (~16 ms).
+// 0.08 was too slow for fast sweeps. 0.14 lets the crosshair cross the full
+// screen in ~0.12 s of sustained motion while still blocking single-frame spikes.
+const MAX_DELTA_PER_FRAME = 0.14;
 
 const state = {
   socket: null,
   roomCode: '',
-  serverIP: localStorage.getItem('custom_ip') || 'cryptoduckhunt.replit.app',
+  serverIP: '192.168.10.2',
   connected: false,
   qBase: null,
   qNow: { w: 1, x: 0, y: 0, z: 0 },
@@ -300,16 +308,23 @@ function attachSensorListeners() {
   state.orientationCount = 0;
   state.motionCount = 0;
 
-  // Android prefers 'deviceorientationabsolute' for magnetometer-backed data.
-  // iOS uses 'deviceorientation' (magnetometer-backed) or requests permission.
-  
+  // Android fires BOTH 'deviceorientation' and 'deviceorientationabsolute' for
+  // the same physical frame. Deduplicate with a timestamp gate so onOrientation
+  // is called at most once per frame (~16 ms).
+  let lastOrientationTs = 0;
   const handleAnyOrientation = (e) => {
+    const now = performance.now();
+    if (now - lastOrientationTs < 8) return; // skip duplicate within same frame
+    lastOrientationTs = now;
     state.orientationCount++;
     onOrientation(e);
   };
 
+  // Use plain 'deviceorientation' on both platforms. It gives alpha relative to
+  // the sensor's own reset frame (not magnetic north), which behaves identically
+  // on Android and iOS and avoids the 0/360 wrap-jump that 'absolute' causes
+  // when the user pans near north.
   window.addEventListener('deviceorientation', handleAnyOrientation, true);
-  window.addEventListener('deviceorientationabsolute', handleAnyOrientation, true);
   window.addEventListener('devicemotion', (e) => { 
     state.motionCount++; 
   }, true);
@@ -339,9 +354,17 @@ function onOrientation(e) {
   const betaRaw  = e.beta;  // -180..180, rotation around x (front/back tilt)
   const gammaRaw = e.gamma; // -90..90,  rotation around y (left/right tilt)
 
-  const alpha = Number.isFinite(alphaRaw) ? alphaRaw : state.lastRaw.alpha;
+  let alpha = Number.isFinite(alphaRaw) ? alphaRaw : state.lastRaw.alpha;
   const beta  = Number.isFinite(betaRaw)  ? betaRaw  : state.lastRaw.beta;
   const gamma = Number.isFinite(gammaRaw) ? gammaRaw : state.lastRaw.gamma;
+
+  // Correct the 0/360 wraparound: if alpha jumps more than 180 degrees from
+  // the last known value, unwrap it so the quaternion doesn't spike.
+  if (Number.isFinite(state.lastRaw.alpha)) {
+    let diff = alpha - state.lastRaw.alpha;
+    if (diff > 180)  alpha -= 360;
+    if (diff < -180) alpha += 360;
+  }
 
   if (!Number.isFinite(alpha) || !Number.isFinite(beta) || !Number.isFinite(gamma)) {
     state.invalidOrientationCount++;
@@ -469,33 +492,45 @@ function emit() {
   if (now - state.lastEmitAt < 1000 / targetHz) return;
   state.lastEmitAt = now;
 
-  let rnx = 0, rny = 0;
+  let nx = 0, ny = 0;
   if (state.qBase) {
     const { yaw, pitch } = relativeYawPitch();
-    rnx = mapToNormalized(yaw,   state.calib.yawLeft,   state.calib.yawRight);
-    rny = mapToNormalized(pitch, state.calib.pitchDown, state.calib.pitchUp);
+    const rnx = mapToNormalized(yaw,   state.calib.yawLeft,   state.calib.yawRight);
+    const rny = mapToNormalized(pitch, state.calib.pitchDown, state.calib.pitchUp);
+
+    // Single One-Euro filter pass on state.filt.
+    const tNow = now / 1000;
+    const rawNx = oneEuro(state.filt, 'x', 'dx', rnx, tNow);
+    const rawNy = oneEuro(state.filt, 'y', 'dy', rny, tNow);
+    state.filt.lastT = tNow;
+    state.filt.primed = true;
+
+    // Clamp how far the output can jump in one frame to absorb sensor spikes.
+    const prevNx = state.filt.lastNx ?? rawNx;
+    const prevNy = state.filt.lastNy ?? rawNy;
+    nx = clamp(rawNx, prevNx - MAX_DELTA_PER_FRAME, prevNx + MAX_DELTA_PER_FRAME);
+    ny = clamp(rawNy, prevNy - MAX_DELTA_PER_FRAME, prevNy + MAX_DELTA_PER_FRAME);
+    state.filt.lastNx = nx;
+    state.filt.lastNy = ny;
+  } else {
+    nx = 0; ny = 0;
   }
 
-  if (!Number.isFinite(rnx) || !Number.isFinite(rny)) {
+  if (!Number.isFinite(nx) || !Number.isFinite(ny)) {
+    state.invalidEmitCount++;
+    state.filt.x = 0; state.filt.y = 0; state.filt.dx = 0; state.filt.dy = 0;
+    state.filt.primed = false;
+    playStatus.textContent = `Sensor packet invalid (${state.invalidEmitCount}). Holding last good target.`;
     return;
   }
-
-  // Single pass of One-Euro filter for responsiveness + jitter reduction
-  const tNow = now / 1000;
-  const fx = oneEuro(state.filt, 'x', 'dx', rnx, tNow);
-  const fy = oneEuro(state.filt, 'y', 'dy', rny, tNow);
-  state.filt.lastT = tNow;
-  state.filt.primed = true;
-
-  if (!Number.isFinite(fx) || !Number.isFinite(fy)) return;
 
   // Rolling 16-bit sequence
   state.gyroSeq = ((state.gyroSeq | 0) + 1) & 0xffff;
 
   // Protocol: Binary Int16Array [nx*10000, ny*10000, seq]
   const buf = new Int16Array(3);
-  buf[0] = Math.round(fx * 10000);
-  buf[1] = Math.round(fy * 10000);
+  buf[0] = Math.round(nx * 10000);
+  buf[1] = Math.round(ny * 10000);
   buf[2] = state.gyroSeq;
 
   if (state.gyroDC && state.gyroDC.readyState === 'open') {
@@ -588,7 +623,8 @@ function startCalibrationWizard() {
   state.calib.step = 1;
   state.calib.done = false;
   state.qBase = null; // forces nx,ny = 0 until first capture
-  state.filt.x = 0; state.filt.y = 0; state.filt.dx = 0; state.filt.dy = 0; state.filt.primed = false;
+  state.filt.x = 0; state.filt.y = 0; state.filt.dx = 0; state.filt.dy = 0;
+  state.filt.primed = false; state.filt.lastNx = 0; state.filt.lastNy = 0;
   playCard.classList.add('hidden');
   calibCard.classList.add('hidden');
   setupCard.classList.add('hidden');
@@ -608,30 +644,78 @@ function renderCalibStep() {
   });
 }
 
+// Average N quaternion samples over CALIB_WINDOW_MS to eliminate per-frame
+// jitter from a single-snapshot capture.
+const CALIB_WINDOW_MS = 400;
+const CALIB_SAMPLES   = 20;
+let calibCapturing = false; // re-entrancy guard during averaging window
+
+function averagedQNow() {
+  return new Promise((resolve) => {
+    const samples = [];
+    const interval = CALIB_WINDOW_MS / CALIB_SAMPLES;
+    let count = 0;
+    const id = setInterval(() => {
+      samples.push({ ...state.qNow });
+      count++;
+      if (count >= CALIB_SAMPLES) {
+        clearInterval(id);
+        // Simple component-wise mean then re-normalise.
+        let w = 0, x = 0, y = 0, z = 0;
+        // Flip quaternions that are in the opposite hemisphere to samples[0]
+        // so the mean doesn't cancel out at the antipode.
+        const ref = samples[0];
+        for (const q of samples) {
+          const dot = ref.w*q.w + ref.x*q.x + ref.y*q.y + ref.z*q.z;
+          const s = dot < 0 ? -1 : 1;
+          w += s * q.w; x += s * q.x; y += s * q.y; z += s * q.z;
+        }
+        resolve(normalizeQuat({ w, x, y, z }));
+      }
+    }, interval);
+  });
+}
+
 function captureCalibStep() {
   if (!state.haveOrientation) return;
+  if (calibCapturing) return; // ignore re-entrant calls (volume btn double-press)
   const idx = state.calib.step - 1;
   const step = CALIB_STEPS[idx];
   if (!step) return;
 
-  if (step.key === 'center') {
-    state.qBase = { ...state.qNow };
-    state.filt.x = 0; state.filt.y = 0; state.filt.dx = 0; state.filt.dy = 0; state.filt.primed = false;
-  } else {
-    const { yaw, pitch } = relativeYawPitch();
-    // Store signed values so the mapping auto-corrects for sign conventions.
-    if (step.key === 'left')   state.calib.yawLeft   = yaw;
-    if (step.key === 'right')  state.calib.yawRight  = yaw;
-    if (step.key === 'top')    state.calib.pitchUp   = pitch;
-    if (step.key === 'bottom') state.calib.pitchDown = pitch;
-  }
+  calibCapturing = true;
+  // Lock button to prevent double-tap during averaging window.
+  const btn = $('calibCaptureBtn');
+  btn.disabled = true;
+  btn.textContent = 'Holding…';
 
-  state.calib.step++;
-  if (state.calib.step > CALIB_STEPS.length) {
-    finishCalibration();
-  } else {
-    renderCalibStep();
-  }
+  averagedQNow().then((avgQ) => {
+    calibCapturing = false;
+    btn.disabled = false;
+    btn.textContent = 'Capture';
+
+    if (step.key === 'center') {
+      state.qBase = avgQ;
+      state.filt.x = 0; state.filt.y = 0; state.filt.dx = 0; state.filt.dy = 0; state.filt.primed = false;
+    } else {
+      // Temporarily use averaged q as qNow to get a stable yaw/pitch reading.
+      const prevQNow = state.qNow;
+      state.qNow = avgQ;
+      const { yaw, pitch } = relativeYawPitch();
+      state.qNow = prevQNow;
+      if (step.key === 'left')   state.calib.yawLeft   = yaw;
+      if (step.key === 'right')  state.calib.yawRight  = yaw;
+      if (step.key === 'top')    state.calib.pitchUp   = pitch;
+      if (step.key === 'bottom') state.calib.pitchDown = pitch;
+    }
+
+    state.calib.step++;
+    if (state.calib.step > CALIB_STEPS.length) {
+      finishCalibration();
+    } else {
+      renderCalibStep();
+    }
+  });
 }
 
 function finishCalibration() {
@@ -665,8 +749,8 @@ let lastFireTime = 0;
 function fire() {
   const now = Date.now();
   
-  // Tight cooldown so the shotgun feels responsive; 300ms during calibration
-  const cooldown = state.calib.done ? 300 : 300;
+  // Longer cooldown during calibration to avoid double-captures.
+  const cooldown = state.calib.done ? 300 : 500;
   
   if (now - lastFireTime < cooldown) return; 
   lastFireTime = now;
