@@ -49,5 +49,9 @@
     <string>Used to track how you aim the phone so the on-screen crosshair follows your motion.</string>
     <key>NSCameraUsageDescription</key>
     <string>Used to flash the camera light when firing the gun.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Used to capture voice commands for controlling the dog in the game.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Used to recognize voice commands like "sit", "fetch", and "come" to control the dog.</string>
   </dict>
 </plist>
