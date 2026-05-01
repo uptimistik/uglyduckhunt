@@ -1,0 +1,22 @@
+# Electron build outputs
+desktop/dist-app/
+desktop/bundled/
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-ssr/
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# iOS build artifacts (controller specific)
+controller/ios/build/
