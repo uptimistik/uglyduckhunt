@@ -5,9 +5,13 @@ import { CapacitorVolumeButtons } from 'capacitor-volume-buttons';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { CapacitorFlash } from '@capgo/capacitor-flash';
 import { BarcodeScanner, BarcodeFormat } from '@capacitor-mlkit/barcode-scanning';
+import { SpeechRecognition } from '@capacitor-community/speech-recognition';
 
 // Platform detection: QR scanner only works in native iOS/Android
 const isNative = Capacitor.isNativePlatform();
+const isIOS = Capacitor.getPlatform() === 'ios';
+const isAndroid = Capacitor.getPlatform() === 'android';
+const hasNativeSpeech = isNative;
 
 // ============================================================
 // Air Mouse Controller — v2
@@ -1095,123 +1099,98 @@ function setupVolumeTriggers() {
   }
 }
 
-// ---------------- Voice Recognition ----------------
-// Phone mic captures commands, sends to PC for execution
-let isVoiceActive = false;
-let voiceRecognition = null;
-const SpeechRecognitionCtrl = window.SpeechRecognition || window.webkitSpeechRecognition;
-
-function initVoiceRecognition() {
-  if (!SpeechRecognitionCtrl) {
-    $('voiceStatusBlank').textContent = 'Voice not supported';
-    return false;
+// Wire up voice button - use native speech on iOS/Android
+if (!isNative) {
+  // Browser version - hide button (use phone browser instead)
+  $('voiceBtnBlank').style.display = 'none';
+  $('voiceStatusBlank').textContent = 'Use phone browser for voice';
+} else {
+  // Native iOS/Android - use native speech plugin
+  let isListening = false;
+  let speechListener = null;
+  
+  async function toggleVoice() {
+    if (!isListening) {
+      // Start listening
+      try {
+        const available = await SpeechRecognition.available();
+        if (!available.available) {
+          $('voiceStatusBlank').textContent = 'Speech not available on this device';
+          $('voiceStatusBlank').style.color = '#ff5252';
+          return;
+        }
+        
+        // Add listener for partial/final results
+        speechListener = await SpeechRecognition.addListener('listeningState', (result) => {
+          const partial = result.partialResult?.toLowerCase() || '';
+          const final = result.finalResult?.toLowerCase() || '';
+          const heard = partial || final;
+          
+          if (heard) {
+            $('voiceStatusBlank').textContent = `Heard: "${heard}"`;
+            
+            // Parse dog commands
+            const dogNames = ['goldie', 'rusty', 'snowy'];
+            let targetDog = null;
+            let command = null;
+            
+            for (const name of dogNames) {
+              if (heard.includes(name)) { targetDog = name; break; }
+            }
+            
+            if (heard.includes('fetch') || heard.includes('get it')) {
+              command = 'fetch';
+            } else if (heard.includes('come') || heard.includes('here')) {
+              command = 'come';
+            } else if (heard.includes('sit') || heard.includes('stay')) {
+              command = 'sit';
+            } else if (heard.includes('good boy') || heard.includes('good girl') || heard.includes('treat')) {
+              command = 'treat';
+            }
+            
+            if (command && final) {
+              // Only send on final result
+              sendEvent('voice_command', { command, target: targetDog, transcript: heard });
+              $('voiceStatusBlank').style.color = '#4caf50';
+              setTimeout(() => { $('voiceStatusBlank').style.color = '#888'; }, 500);
+            }
+          }
+        });
+        
+        await SpeechRecognition.start({
+          language: 'en-US',
+          maxResults: 5,
+          partialResults: true,
+          popup: true
+        });
+        
+        isListening = true;
+        $('voiceBtnBlank').textContent = 'VOICE ACTIVE';
+        $('voiceBtnBlank').style.background = '#4caf50';
+        $('voiceStatusBlank').textContent = 'Listening...';
+        $('voiceStatusBlank').style.color = '#fff';
+      } catch (err) {
+        console.error('Speech start error:', err);
+        $('voiceStatusBlank').textContent = `Error: ${err.message}`;
+      }
+    } else {
+      // Stop listening
+      try {
+        if (speechListener) {
+          speechListener.remove();
+          speechListener = null;
+        }
+        await SpeechRecognition.stop();
+        isListening = false;
+        $('voiceBtnBlank').textContent = 'ENABLE VOICE';
+        $('voiceBtnBlank').style.background = '#ff9d00';
+        $('voiceStatusBlank').textContent = 'Voice paused';
+        $('voiceStatusBlank').style.color = '#888';
+      } catch (err) {
+        console.error('Speech stop error:', err);
+      }
+    }
   }
   
-  voiceRecognition = new SpeechRecognitionCtrl();
-  voiceRecognition.continuous = true;
-  voiceRecognition.lang = 'en-US';
-  voiceRecognition.interimResults = true;
-  
-  let finalTranscript = '';
-  let interimTranscript = '';
-  
-  voiceRecognition.onresult = (event) => {
-    interimTranscript = '';
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const transcript = event.results[i][0].transcript;
-      if (event.results[i].isFinal) {
-        finalTranscript = transcript;
-      } else {
-        interimTranscript += transcript;
-      }
-    }
-    
-    const heard = (finalTranscript || interimTranscript).toLowerCase().trim();
-    if (heard) {
-      $('voiceStatusBlank').textContent = `Heard: "${heard}"`;
-      
-      // Parse dog commands
-      const dogNames = ['goldie', 'rusty', 'snowy'];
-      const commands = ['sit', 'fetch', 'come', 'here', 'stay', 'good boy', 'good girl'];
-      
-      let targetDog = null;
-      let command = null;
-      
-      for (const name of dogNames) {
-        if (heard.includes(name)) {
-          targetDog = name;
-          break;
-        }
-      }
-      
-      for (const cmd of commands) {
-        if (heard.includes(cmd)) {
-          command = cmd;
-          break;
-        }
-      }
-      
-      // Special cases
-      if (heard.includes('fetch') || heard.includes('get it') || heard.includes('get that')) {
-        command = 'fetch';
-      } else if (heard.includes('come') || heard.includes('here')) {
-        command = 'come';
-      } else if (heard.includes('sit') || heard.includes('stay')) {
-        command = 'sit';
-      } else if (heard.includes('good boy') || heard.includes('good girl') || heard.includes('treat')) {
-        command = 'treat';
-      }
-      
-      if (command) {
-        // Send to PC via WebRTC/socket
-        sendEvent('voice_command', {
-          command: command,
-          target: targetDog,
-          transcript: heard
-        });
-        $('voiceStatusBlank').style.color = '#4caf50';
-        setTimeout(() => { $('voiceStatusBlank').style.color = '#888'; }, 500);
-      }
-    }
-  };
-  
-  voiceRecognition.onerror = (e) => {
-    console.error('Voice error:', e);
-    $('voiceStatusBlank').textContent = `Error: ${e.error}`;
-    isVoiceActive = false;
-    $('voiceBtnBlank').textContent = 'ENABLE VOICE';
-    $('voiceBtnBlank').style.background = '#ff9d00';
-  };
-  
-  voiceRecognition.onend = () => {
-    if (isVoiceActive) {
-      voiceRecognition.start(); // Restart if still active
-    }
-  };
-  
-  return true;
-}
-
-// Wire up voice button
-if (SpeechRecognitionCtrl) {
-  initVoiceRecognition();
-  $('voiceBtnBlank').addEventListener('click', () => {
-    isVoiceActive = !isVoiceActive;
-    if (isVoiceActive) {
-      voiceRecognition.start();
-      $('voiceBtnBlank').textContent = 'VOICE ACTIVE';
-      $('voiceBtnBlank').style.background = '#4caf50';
-      $('voiceStatusBlank').textContent = 'Listening for dog commands...';
-      $('voiceStatusBlank').style.color = '#fff';
-    } else {
-      voiceRecognition.stop();
-      $('voiceBtnBlank').textContent = 'ENABLE VOICE';
-      $('voiceBtnBlank').style.background = '#ff9d00';
-      $('voiceStatusBlank').textContent = 'Voice paused';
-      $('voiceStatusBlank').style.color = '#888';
-    }
-  });
-} else {
-  $('voiceBtnBlank').style.display = 'none';
-  $('voiceStatusBlank').textContent = 'Voice API not available';
+  $('voiceBtnBlank').addEventListener('click', toggleVoice);
 }

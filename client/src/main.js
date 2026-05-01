@@ -32,15 +32,20 @@ document.querySelector('#app').innerHTML = `
       </div>
     </div>
     
-    <!-- Dog Stats & Voice Control Panel -->
+    <!-- Dog Stats & Voice Commands Panel -->
     <div id="dog-panel" class="panel">
       <div class="title">DOG COMMANDS</div>
       <div id="dogs-container">
         <!-- Dog stats will be injected here -->
       </div>
       <div class="dog-stat-line" style="margin: 5px 8px;"><span>POUCH</span><b id="dog-pouch">🍪🍪🍪</b></div>
-      <div id="voice-btn">ENABLE VOICE MIC</div>
-      <div id="voice-status">Mic Offline</div>
+      <div class="command-list">
+        <div class="cmd-item" id="cmd-sit">🐕 SIT</div>
+        <div class="cmd-item" id="cmd-fetch">🦆 FETCH</div>
+        <div class="cmd-item" id="cmd-come">🏃 COME</div>
+        <div class="cmd-item" id="cmd-treat">🍪 TREAT</div>
+      </div>
+      <div id="voice-status">Say commands on your phone</div>
     </div>
 
     <!-- Badges Panel -->
@@ -151,10 +156,10 @@ css.textContent = `
 
   .dog-stats { display:flex; flex-direction:column; gap:4px; font-size:12px; color:#aaa; margin-bottom:10px; }
   .dog-stats b { color:#ff9d00; float:right; }
-  #voice-btn { background:#ff9d00; color:#000; padding:8px; border-radius:4px; text-align:center; font-size:11px; font-weight:800; cursor:pointer; transition:0.2s; }
-  #voice-btn:hover { background:#ffb74d; transform:scale(1.05); }
-  #voice-btn.active { background:#4caf50; color:#fff; }
-  #voice-status { font-size:10px; text-align:center; color:#888; font-style:italic; }
+  .command-list { display:flex; flex-direction:column; gap:6px; margin-top:10px; }
+  .cmd-item { background:#2a3142; color:#b6bdcb; padding:8px; border-radius:4px; text-align:center; font-size:12px; font-weight:600; transition:0.3s; border:1px solid #3a4156; }
+  .cmd-item.active { background:#4caf50; color:#fff; border-color:#4caf50; transform:scale(1.05); }
+  #voice-status { font-size:10px; text-align:center; color:#888; font-style:italic; margin-top:8px; }
 
   /* Multi-player score panel */
   #player-scores { display:flex; gap:30px; }
@@ -439,6 +444,7 @@ function setupRTCFor(playerId) {
       case 'voice_command':
         if (d.command) {
           handleDogCommand(d.command, d.target);
+          $('voice-status').textContent = `Phone: "${d.transcript || d.command}"`;
           console.log(`[Voice] ${d.target || 'any'}: ${d.command} (${d.transcript})`);
         }
         break;
@@ -509,84 +515,27 @@ socket.on('calib_done', (data) => {
   }
 });
 
-// --------------------------- Voice Recognition -----------------------
-let isVoiceEnabled = false;
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-
-if (SpeechRecognition) {
-  const recognition = new SpeechRecognition();
-  recognition.continuous = true;
-  recognition.lang = 'en-US';
-  recognition.interimResults = true; // FASTER: React before user stops talking
-
-  recognition.onresult = (event) => {
-    let interimTranscript = '';
-    let finalTranscript = '';
-
-    for (let i = event.resultIndex; i < event.results.length; ++i) {
-      if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
-      else interimTranscript += event.results[i][0].transcript;
-    }
-
-    const transcript = (finalTranscript || interimTranscript).toLowerCase();
-    $('voice-status').textContent = `Heard: "${transcript}"`;
-    
-    const dogNames = ['goldie', 'rusty', 'snowy'];
-    let targetDog = null;
-    dogNames.forEach(name => {
-      if (transcript.includes(name)) targetDog = name;
-    });
-
-    // Fuzzy matching for better accuracy
-    if (transcript.includes('sit') || transcript.includes('set') || transcript.includes('stay')) {
-      handleDogCommand('sit', targetDog);
-    } else if (transcript.includes('fetch') || transcript.includes('search') || transcript.includes('go')) {
-      handleDogCommand('fetch', targetDog);
-    } else if (transcript.includes('relax') || transcript.includes('rest') || transcript.includes('ok')) {
-      handleDogCommand('relax', targetDog);
-    } else if (transcript.includes('good') || transcript.includes('boy') || transcript.includes('treat')) {
-      handleDogCommand('good boy', targetDog);
-    }
+// --------------------------- Voice Commands (from Phone) -----------------------
+function highlightCommand(cmd) {
+  const cmdMap = {
+    'sit': 'cmd-sit',
+    'fetch': 'cmd-fetch',
+    'come': 'cmd-come',
+    'treat': 'cmd-treat',
+    'good boy': 'cmd-treat',
+    'good girl': 'cmd-treat'
   };
-
-  recognition.onerror = (e) => {
-    console.error('Speech recognition error', e);
-    isVoiceEnabled = false;
-    $('voice-btn').classList.remove('active');
-    $('voice-btn').textContent = 'ENABLE VOICE MIC';
-    
-    if (isElectron) {
-      $('voice-status').textContent = 'Voice Commands require an internet-connected browser (Chrome/Safari) and are restricted in the Desktop app shell.';
-      $('voice-status').style.color = '#ff5252';
-    } else {
-      $('voice-status').textContent = `Mic Error: ${e.error}`;
-    }
-  };
-
-  recognition.onend = () => {
-    if (isVoiceEnabled) recognition.start();
-  };
-
-  $('voice-btn').addEventListener('click', () => {
-    isVoiceEnabled = !isVoiceEnabled;
-    if (isVoiceEnabled) {
-      recognition.start();
-      $('voice-btn').classList.add('active');
-      $('voice-btn').textContent = 'VOICE ACTIVE';
-      $('voice-status').textContent = 'Listening for: sit, fetch, good boy...';
-    } else {
-      recognition.stop();
-      $('voice-btn').classList.remove('active');
-      $('voice-btn').textContent = 'ENABLE VOICE MIC';
-      $('voice-status').textContent = 'Mic Offline';
-    }
-  });
-} else {
-  $('voice-btn').style.display = 'none';
-  $('voice-status').textContent = 'Voice API not supported in this browser';
+  const elId = cmdMap[cmd];
+  if (!elId) return;
+  const el = $(elId);
+  if (el) {
+    el.classList.add('active');
+    setTimeout(() => el.classList.remove('active'), 1000);
+  }
 }
 
 function handleDogCommand(cmd, targetName) {
+  highlightCommand(cmd);
   const status = $('voice-status');
   status.style.color = '#fff';
   status.style.fontWeight = 'bold';
@@ -1999,6 +1948,7 @@ socket.on('trigger', (info) => {
 socket.on('voice_command', (info) => {
   if (info?.command) {
     handleDogCommand(info.command, info.target);
+    $('voice-status').textContent = `Phone: "${info.transcript || info.command}"`;
     console.log(`[Voice via relay] ${info.target || 'any'}: ${info.command}`);
   }
 });
